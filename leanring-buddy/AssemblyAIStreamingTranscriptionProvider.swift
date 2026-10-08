@@ -19,7 +19,16 @@ struct AssemblyAIStreamingTranscriptionProviderError: LocalizedError {
 final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider {
     /// URL for the Cloudflare Worker endpoint that returns a short-lived
     /// AssemblyAI streaming token. The real API key never leaves the server.
-    private static let tokenProxyURL = "https://your-worker-name.your-subdomain.workers.dev/transcribe-token"
+    /// LOCAL: short-lived streaming token fetched directly from AssemblyAI (key from the Keychain).
+    private static let tokenURL = "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480"
+    /// Never cache token responses on disk.
+    private static let tokenSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 15
+        return URLSession(configuration: configuration)
+    }()
 
     let displayName = "AssemblyAI"
     let requiresSpeechRecognitionPermission = false
@@ -33,15 +42,65 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     /// a few rapid reconnections to the same host.
     private let sharedWebSocketURLSession = URLSession(configuration: .default)
 
+    // MARK: - Token prefetch (LOCAL FIX)
+
+    private let prefetchedTokenLock = NSLock()
+    private var prefetchedToken: (value: String, fetchedAt: Date)?
+    /// Tokens are valid for 480s; refresh well before that.
+    private static let maximumPrefetchedTokenAgeSeconds: TimeInterval = 300
+
+    init() {
+        Task { [weak self] in
+            // Keep one warm token ready for the next key press, refreshed every few minutes.
+            while let self {
+                await self.prefetchTemporaryToken()
+                try? await Task.sleep(for: .seconds(Self.maximumPrefetchedTokenAgeSeconds - 30))
+            }
+        }
+    }
+
+    private func takeFreshPrefetchedToken() -> String? {
+        prefetchedTokenLock.lock()
+        defer { prefetchedTokenLock.unlock() }
+        guard let prefetchedToken,
+              Date().timeIntervalSince(prefetchedToken.fetchedAt) < Self.maximumPrefetchedTokenAgeSeconds else {
+            self.prefetchedToken = nil
+            return nil
+        }
+        self.prefetchedToken = nil // tokens are single-use
+        return prefetchedToken.value
+    }
+
+    private func storePrefetchedToken(_ tokenValue: String) {
+        prefetchedTokenLock.lock()
+        prefetchedToken = (tokenValue, Date())
+        prefetchedTokenLock.unlock()
+    }
+
+    private func prefetchTemporaryToken() async {
+        if let tokenValue = try? await fetchTemporaryToken() {
+            storePrefetchedToken(tokenValue)
+        }
+    }
+
     func startStreamingSession(
         keyterms: [String],
         onTranscriptUpdate: @escaping (String) -> Void,
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) async throws -> any BuddyStreamingTranscriptionSession {
-        // Fetch a fresh temporary token from the proxy before each session
-        let temporaryToken = try await fetchTemporaryToken()
-        print("🎙️ AssemblyAI: fetched temporary token (\(temporaryToken.prefix(20))...)")
+        // LOCAL FIX: use a token fetched ahead of time (saves a network round trip on every key press),
+        // then immediately prefetch the replacement. Falls back to fetching live if none is cached.
+        let temporaryToken: String
+        if let prefetchedToken = takeFreshPrefetchedToken() {
+            temporaryToken = prefetchedToken
+            print("🎙️ AssemblyAI: using prefetched temporary token")
+            Task { await self.prefetchTemporaryToken() }
+        } else {
+            temporaryToken = try await fetchTemporaryToken()
+            print("🎙️ AssemblyAI: fetched temporary token live (\(temporaryToken.prefix(20))...)")
+            Task { await self.prefetchTemporaryToken() }
+        }
 
         let session = AssemblyAIStreamingTranscriptionSession(
             apiKey: nil,
@@ -57,19 +116,24 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         return session
     }
 
-    /// Calls the Cloudflare Worker to get a short-lived AssemblyAI token.
+    /// Gets a short-lived AssemblyAI streaming token. The real API key never leaves this Mac
+    /// except to AssemblyAI itself, and only the 8-minute token is used for the audio stream.
     private func fetchTemporaryToken() async throws -> String {
-        var request = URLRequest(url: URL(string: Self.tokenProxyURL)!)
-        request.httpMethod = "POST"
+        guard let assemblyAIKey = ThambiKeychain.read(.assemblyAI) else {
+            throw AssemblyAIStreamingTranscriptionProviderError(message: "No AssemblyAI key in the Keychain.")
+        }
+        var request = URLRequest(url: URL(string: Self.tokenURL)!)
+        request.httpMethod = "GET"
+        request.setValue(assemblyAIKey, forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.tokenSession.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             let body = String(data: data, encoding: .utf8) ?? "unknown"
             throw AssemblyAIStreamingTranscriptionProviderError(
-                message: "Failed to fetch AssemblyAI token (HTTP \(statusCode)): \(body)"
+                message: "Failed to fetch AssemblyAI token (HTTP \(statusCode)): \(body.prefix(200))"
             )
         }
 

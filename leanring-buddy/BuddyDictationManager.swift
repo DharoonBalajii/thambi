@@ -214,6 +214,76 @@ private struct BuddyDictationDraftCallbacks {
     let submitDraftText: (String) -> Void
 }
 
+/// LOCAL FIX: thread-safe handoff between the microphone tap (audio thread) and the
+/// transcription session (which needs ~1-2s to fetch a token and open its websocket).
+/// Audio captured before the session is ready is held here, then flushed in order, so
+/// the first words of a push-to-talk utterance are no longer lost.
+final class MicrophoneAudioHandoff: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bufferedAudio: [AVAudioPCMBuffer] = []
+    private var readySession: (any BuddyStreamingTranscriptionSession)?
+    /// ~20s of audio at 1024-frame buffers; a safety cap so a stuck connection can't grow memory forever.
+    private let maximumBufferedAudioBuffers = 1_000
+
+    func reset() {
+        lock.lock()
+        bufferedAudio.removeAll()
+        readySession = nil
+        lock.unlock()
+    }
+
+    /// Called on the audio thread for every microphone buffer.
+    func handle(_ audioBuffer: AVAudioPCMBuffer) {
+        lock.lock()
+        if let readySession {
+            lock.unlock()
+            readySession.appendAudioBuffer(audioBuffer)
+            return
+        }
+        if bufferedAudio.count < maximumBufferedAudioBuffers, let copiedBuffer = Self.copy(of: audioBuffer) {
+            bufferedAudio.append(copiedBuffer)
+        }
+        lock.unlock()
+    }
+
+    /// Sends everything captured so far to the session in order, then switches to live pass-through.
+    /// Returns how many buffered chunks were flushed.
+    @discardableResult
+    func activate(session: any BuddyStreamingTranscriptionSession) -> Int {
+        lock.lock()
+        let flushedBufferCount = bufferedAudio.count
+        for bufferedBuffer in bufferedAudio {
+            session.appendAudioBuffer(bufferedBuffer)
+        }
+        bufferedAudio.removeAll()
+        readySession = session
+        lock.unlock()
+        return flushedBufferCount
+    }
+
+    /// The engine reuses tap buffers after the callback returns, so held audio must be copied.
+    private static func copy(of sourceBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copiedBuffer = AVAudioPCMBuffer(pcmFormat: sourceBuffer.format, frameCapacity: sourceBuffer.frameLength) else {
+            return nil
+        }
+        copiedBuffer.frameLength = sourceBuffer.frameLength
+        let channelCount = Int(sourceBuffer.format.channelCount)
+        let frameCount = Int(sourceBuffer.frameLength)
+        if let sourceFloatChannels = sourceBuffer.floatChannelData, let copiedFloatChannels = copiedBuffer.floatChannelData {
+            for channelIndex in 0..<channelCount {
+                copiedFloatChannels[channelIndex].update(from: sourceFloatChannels[channelIndex], count: frameCount)
+            }
+        } else if let sourceInt16Channels = sourceBuffer.int16ChannelData, let copiedInt16Channels = copiedBuffer.int16ChannelData {
+            for channelIndex in 0..<channelCount {
+                copiedInt16Channels[channelIndex].update(from: sourceInt16Channels[channelIndex], count: frameCount)
+            }
+        } else {
+            return nil
+        }
+        return copiedBuffer
+    }
+}
+
 @MainActor
 final class BuddyDictationManager: NSObject, ObservableObject {
     private static let defaultFinalTranscriptFallbackDelaySeconds: TimeInterval = 2.4
@@ -264,6 +334,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private let transcriptionProvider: any BuddyTranscriptionProvider
     private let audioEngine = AVAudioEngine()
+    private let microphoneAudioHandoff = MicrophoneAudioHandoff()
+    private var captureStartedAt: Date?
+    private var captureStoppedAt: Date?
+    /// If the user releases the shortcut before the transcription session has connected,
+    /// give the connection this long to finish and deliver a transcript.
+    private static let sessionStillConnectingFallbackDelaySeconds: TimeInterval = 10
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
     private var activeStartSource: BuddyDictationStartSource?
     private var draftCallbacks: BuddyDictationDraftCallbacks?
@@ -449,7 +525,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
         do {
             try await startRecognitionSession()
-            guard !Task.isCancelled else {
+            // The session was reset while it was still connecting (e.g. fallback timer fired); nothing more to do.
+            guard activeStartSource != nil else { return }
+            // LOCAL FIX: releasing the shortcut cancels this task. That used to throw away the
+            // recording; now only a genuine accidental tap (< 0.3s of audio) is discarded.
+            let recordedSecondsBeforeRelease = (captureStoppedAt ?? Date()).timeIntervalSince(captureStartedAt ?? Date())
+            guard !(Task.isCancelled && recordedSecondsBeforeRelease < 0.3) else {
                 print("🎙️ BuddyDictationManager: start cancelled (shortcut released during session start)")
                 audioEngine.stop()
                 audioEngine.inputNode.removeTap(onBus: 0)
@@ -488,8 +569,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isRecordingFromKeyboardShortcut = false
         isFinalizingTranscript = true
 
+        captureStoppedAt = Date()
         let finalTranscriptFallbackDelaySeconds = activeTranscriptionSession?.finalTranscriptFallbackDelaySeconds
-            ?? Self.defaultFinalTranscriptFallbackDelaySeconds
+            ?? Self.sessionStillConnectingFallbackDelaySeconds
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -515,48 +597,85 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         activeTranscriptionSession?.cancel()
         activeTranscriptionSession = nil
 
-        print("🎙️ BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
-
-        let activeTranscriptionSession = try await transcriptionProvider.startStreamingSession(
-            keyterms: buildTranscriptionKeyterms(),
-            onTranscriptUpdate: { [weak self] transcriptText in
-                Task { @MainActor in
-                    self?.latestRecognizedText = transcriptText
-                }
-            },
-            onFinalTranscriptReady: { [weak self] transcriptText in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.latestRecognizedText = transcriptText
-
-                    if self.isFinalizingTranscript {
-                        self.finishCurrentDictationSessionIfNeeded(
-                            shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft
-                        )
-                    }
-                }
-            },
-            onError: { [weak self] error in
-                Task { @MainActor in
-                    self?.handleRecognitionError(error)
-                }
-            }
-        )
-
-        self.activeTranscriptionSession = activeTranscriptionSession
-        print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
+        // LOCAL FIX: start recording the instant the shortcut is pressed. Fetching a token and
+        // opening the websocket takes 1-2s, and the old code only started the microphone after
+        // that, so short utterances were over before any audio was captured (empty transcript).
+        // Audio is held in `microphoneAudioHandoff` until the session is ready, then flushed.
+        let microphoneAudioHandoff = self.microphoneAudioHandoff
+        microphoneAudioHandoff.reset()
 
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         inputNode.removeTap(onBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.activeTranscriptionSession?.appendAudioBuffer(buffer)
+            microphoneAudioHandoff.handle(buffer)
             self?.updateAudioPowerLevel(from: buffer)
         }
 
         audioEngine.prepare()
         try audioEngine.start()
+        captureStartedAt = Date()
+        captureStoppedAt = nil
+
+        print("🎙️ BuddyDictationManager: microphone capturing; opening transcription provider \(transcriptionProvider.displayName)")
+
+        let transcriptionProvider = self.transcriptionProvider
+        let transcriptionKeyterms = buildTranscriptionKeyterms()
+
+        // Unstructured Task on purpose: releasing the shortcut cancels the calling task, and that
+        // cancellation must not abort the token fetch / websocket connect while audio is buffered.
+        let openedTranscriptionSession: any BuddyStreamingTranscriptionSession
+        do {
+            openedTranscriptionSession = try await Task {
+                try await transcriptionProvider.startStreamingSession(
+                    keyterms: transcriptionKeyterms,
+                    onTranscriptUpdate: { [weak self] transcriptText in
+                        Task { @MainActor in
+                            self?.latestRecognizedText = transcriptText
+                        }
+                    },
+                    onFinalTranscriptReady: { [weak self] transcriptText in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.latestRecognizedText = transcriptText
+
+                            if self.isFinalizingTranscript {
+                                self.finishCurrentDictationSessionIfNeeded(
+                                    shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft
+                                )
+                            }
+                        }
+                    },
+                    onError: { [weak self] error in
+                        Task { @MainActor in
+                            self?.handleRecognitionError(error)
+                        }
+                    }
+                )
+            }.value
+        } catch {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+            microphoneAudioHandoff.reset()
+            throw error
+        }
+
+        // The session may have been reset (fallback timer / cancel) while it was connecting.
+        guard activeStartSource != nil else {
+            openedTranscriptionSession.cancel()
+            microphoneAudioHandoff.reset()
+            return
+        }
+
+        self.activeTranscriptionSession = openedTranscriptionSession
+        let flushedBufferCount = microphoneAudioHandoff.activate(session: openedTranscriptionSession)
+        print("🎙️ BuddyDictationManager: provider ready, flushed \(flushedBufferCount) buffered audio chunks")
+
+        // User already let go while we were connecting: now that all audio is sent, ask for the transcript.
+        if isFinalizingTranscript {
+            openedTranscriptionSession.requestFinalTranscript()
+        }
     }
 
     private func handleRecognitionError(_ error: Error) {
@@ -628,6 +747,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private func resetSessionState() {
         pendingStartRequestIdentifier = UUID()
+        microphoneAudioHandoff.reset()
+        captureStartedAt = nil
+        captureStoppedAt = nil
         activeTranscriptionSession = nil
         draftCallbacks = nil
         activeStartSource = nil
@@ -651,7 +773,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private func buildTranscriptionKeyterms() -> [String] {
         let baseKeyterms = [
-            "makesomething",
             "Learning Buddy",
             "Codex",
             "Claude",

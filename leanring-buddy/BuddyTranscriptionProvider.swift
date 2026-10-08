@@ -32,7 +32,6 @@ protocol BuddyTranscriptionProvider {
 enum BuddyTranscriptionProviderFactory {
     private enum PreferredProvider: String {
         case assemblyAI = "assemblyai"
-        case openAI = "openai"
         case appleSpeech = "apple"
     }
 
@@ -42,59 +41,16 @@ enum BuddyTranscriptionProviderFactory {
         return provider
     }
 
+    /// AssemblyAI by default. Apple's on-device speech (nothing leaves the Mac) when chosen in
+    /// Info.plist, or automatically when no AssemblyAI key is in the Keychain.
     private static func resolveProvider() -> any BuddyTranscriptionProvider {
-        let preferredProviderRawValue = AppBundleConfiguration
-            .stringValue(forKey: "VoiceTranscriptionProvider")?
-            .lowercased()
-        let preferredProvider = preferredProviderRawValue.flatMap(PreferredProvider.init(rawValue:))
+        let preferredProvider = AppBundleConfiguration
+            .stringValue(forKey: "VoiceTranscriptionProvider")
+            .flatMap { PreferredProvider(rawValue: $0.lowercased()) }
 
-        let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
-        let openAIProvider = OpenAIAudioTranscriptionProvider()
-
-        if preferredProvider == .appleSpeech {
+        if preferredProvider == .appleSpeech || ThambiKeychain.read(.assemblyAI) == nil {
             return AppleSpeechTranscriptionProvider()
         }
-
-        if preferredProvider == .assemblyAI {
-            if assemblyAIProvider.isConfigured {
-                return assemblyAIProvider
-            }
-
-            print("⚠️ Transcription: AssemblyAI preferred but not configured, falling back")
-
-            if openAIProvider.isConfigured {
-                print("⚠️ Transcription: using OpenAI as fallback")
-                return openAIProvider
-            }
-
-            print("⚠️ Transcription: using Apple Speech as fallback")
-            return AppleSpeechTranscriptionProvider()
-        }
-
-        if preferredProvider == .openAI {
-            if openAIProvider.isConfigured {
-                return openAIProvider
-            }
-
-            print("⚠️ Transcription: OpenAI preferred but not configured, falling back")
-
-            if assemblyAIProvider.isConfigured {
-                print("⚠️ Transcription: using AssemblyAI as fallback")
-                return assemblyAIProvider
-            }
-
-            print("⚠️ Transcription: using Apple Speech as fallback")
-            return AppleSpeechTranscriptionProvider()
-        }
-
-        if assemblyAIProvider.isConfigured {
-            return assemblyAIProvider
-        }
-
-        if openAIProvider.isConfigured {
-            return openAIProvider
-        }
-
-        return AppleSpeechTranscriptionProvider()
+        return AssemblyAIStreamingTranscriptionProvider()
     }
 }
