@@ -165,12 +165,32 @@ struct BlueCursorView: View {
     /// Only during the return flight can cursor movement cancel the animation.
     @State private var isReturningToCursor: Bool = false
 
-    // MARK: - Onboarding Video Layout
+    // MARK: - Target Highlight (LOCAL ADDITION: drawn ring + arrow at the pointed-at spot)
 
-    private let onboardingVideoPlayerWidth: CGFloat = 330
-    private let onboardingVideoPlayerHeight: CGFloat = 186
+    /// Exact target (SwiftUI coords) captured when navigation starts, shown once the buddy lands.
+    @State private var pendingHighlightTargetInSwiftUI: CGPoint?
+    /// Non-nil while the arrow should be drawn on this screen.
+    @State private var highlightedTargetInSwiftUI: CGPoint?
+    /// Where the buddy rests (the arrow's tail end), away from the target so the target stays visible.
+    @State private var pendingHighlightBuddyRestingPosition: CGPoint = .zero
+    /// Identity of the current pointing session (see holdPointingThenFlyBack).
+    @State private var currentPointingSessionIdentifier = UUID()
+    @State private var highlightedBuddyRestingPosition: CGPoint = .zero
 
-    private let fullWelcomeMessage = "hey! i'm clicky"
+    /// The label bubble sits on the far side of the buddy from the target, never on the target itself.
+    private var navigationBubbleCenterAwayFromTarget: CGPoint {
+        guard let targetInSwiftUI = pendingHighlightTargetInSwiftUI ?? highlightedTargetInSwiftUI else {
+            return CGPoint(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+        }
+        return TargetArrowLayout.bubbleCenter(
+            buddyPosition: cursorPosition,
+            target: targetInSwiftUI,
+            bubbleSize: navigationBubbleSize,
+            screenSize: screenFrame.size
+        )
+    }
+
+    private let fullWelcomeMessage = "hey! i'm thambi"
 
     private let navigationPointerPhrases = [
         "right here!",
@@ -214,23 +234,7 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Onboarding video — always in the view tree so opacity animation works
-            // reliably. When no player exists or opacity is 0, nothing is visible.
-            // allowsHitTesting(false) prevents it from intercepting clicks.
-            OnboardingVideoPlayerView(player: companionManager.onboardingVideoPlayer)
-                .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
-                .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
-                .position(
-                    x: cursorPosition.x + 10 + (onboardingVideoPlayerWidth / 2),
-                    y: cursorPosition.y + 18 + (onboardingVideoPlayerHeight / 2)
-                )
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
-                .allowsHitTesting(false)
-
-            // Onboarding prompt — "press control + option and say hi" streamed after video ends
+            // Onboarding prompt — "press control + option and say hi" streamed after the welcome message
             if isCursorOnThisScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
                 Text(companionManager.onboardingPromptText)
                     .font(.system(size: 11, weight: .medium))
@@ -285,13 +289,20 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(navigationBubbleCenterAwayFromTarget)
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
                     .onPreferenceChange(NavigationBubbleSizePreferenceKey.self) { newSize in
                         navigationBubbleSize = newSize
                     }
+            }
+
+            // Drawn arrow from the buddy to just short of the exact spot being pointed at.
+            if let highlightedTargetInSwiftUI {
+                TargetHighlightView(target: highlightedTargetInSwiftUI, buddyRestingPosition: highlightedBuddyRestingPosition)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
 
             // Blue triangle cursor — shown when idle or while TTS is playing (responding).
@@ -366,7 +377,6 @@ struct BlueCursorView: View {
         .onDisappear {
             timer?.invalidate()
             navigationAnimationTimer?.invalidate()
-            companionManager.tearDownOnboardingVideo()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
             // When a UI element location is detected, navigate the buddy to
@@ -379,6 +389,8 @@ struct BlueCursorView: View {
             // Only navigate if the target is on THIS screen
             guard screenFrame.contains(CGPoint(x: displayFrame.midX, y: displayFrame.midY))
                   || displayFrame == screenFrame else {
+                // The voice moved on to a target on another screen: stop pointing here.
+                standDownBecauseNextTargetIsOnAnotherScreen()
                 return
             }
 
@@ -413,19 +425,10 @@ struct BlueCursorView: View {
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
 
-            // During forward flight or pointing, the buddy is NOT interrupted by
-            // mouse movement — it completes its full animation and return flight.
-            // Only during the RETURN flight do we allow cursor movement to cancel
-            // (so the buddy snaps to following if the user moves while it's flying back).
+            // LOCAL: pointing is never disturbed by mouse movement. The flight out, the arrow, the
+            // wait between spoken targets and the flight back all run to completion no matter what the
+            // mouse does (the upstream version cancelled the return flight if you moved >100pt).
             if self.buddyNavigationMode == .navigatingToTarget && self.isReturningToCursor {
-                let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
-                let distanceFromNavigationStart = hypot(
-                    currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
-                    currentMouseInSwiftUI.y - self.cursorPositionWhenNavigationStarted.y
-                )
-                if distanceFromNavigationStart > 100 {
-                    cancelNavigationAndResumeFollowing()
-                }
                 return
             }
 
@@ -457,21 +460,28 @@ struct BlueCursorView: View {
         // Don't interrupt welcome animation
         guard !showWelcome || welcomeText.isEmpty else { return }
 
+        // LOCAL: when moving between several targets, drop the previous target's drawing first.
+        withAnimation(.easeOut(duration: 0.25)) {
+            highlightedTargetInSwiftUI = nil
+        }
+
         // Convert the AppKit screen location to SwiftUI coordinates for this screen
         let targetInSwiftUI = convertScreenPointToSwiftUICoordinates(screenLocation)
-
-        // Offset the target so the buddy sits beside the element rather than
-        // directly on top of it — 8px to the right, 12px below.
-        let offsetTarget = CGPoint(
-            x: targetInSwiftUI.x + 8,
-            y: targetInSwiftUI.y + 12
+        let exactTargetInSwiftUI = CGPoint(
+            x: max(0, min(targetInSwiftUI.x, screenFrame.width)),
+            y: max(0, min(targetInSwiftUI.y, screenFrame.height))
         )
+        pendingHighlightTargetInSwiftUI = exactTargetInSwiftUI
 
-        // Clamp target to screen bounds with padding
-        let clampedTarget = CGPoint(
-            x: max(20, min(offsetTarget.x, screenFrame.width - 20)),
-            y: max(20, min(offsetTarget.y, screenFrame.height - 20))
+        // LOCAL: the buddy no longer lands ON the element. It rests away from it, at the tail of
+        // an arrow that points at the exact spot, so the thing being pointed at stays fully visible.
+        let clampedTarget = TargetArrowLayout.bestBuddyRestingPosition(
+            forTarget: exactTargetInSwiftUI,
+            screenSize: screenFrame.size,
+            bubbleSize: TargetArrowLayout.estimatedBubbleSize(forLabel: companionManager.detectedElementBubbleText),
+            busyness: companionManager.detectedElementLayoutMap
         )
+        pendingHighlightBuddyRestingPosition = clampedTarget
 
         // Record the current cursor position so we can detect if the user
         // moves the mouse enough to cancel the return flight
@@ -572,6 +582,12 @@ struct BlueCursorView: View {
     private func startPointingAtElement() {
         buddyNavigationMode = .pointingAtTarget
 
+        // Draw the ring + arrow on the exact spot now that the buddy has landed.
+        highlightedBuddyRestingPosition = pendingHighlightBuddyRestingPosition
+        withAnimation(.easeOut(duration: 0.2)) {
+            highlightedTargetInSwiftUI = pendingHighlightTargetInSwiftUI
+        }
+
         // Rotate back to default pointer angle now that we've arrived
         triangleRotationDegrees = -35.0
 
@@ -587,17 +603,65 @@ struct BlueCursorView: View {
             ?? navigationPointerPhrases.randomElement()
             ?? "right here!"
 
+        // LOCAL: each pointing session gets an identity so a stale hold/wait from an earlier
+        // target can never fly the buddy home while a newer target is being pointed at.
+        let pointingSessionIdentifier = UUID()
+        currentPointingSessionIdentifier = pointingSessionIdentifier
+
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
-            // All characters streamed — hold for 3 seconds, then fly back
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                guard self.buddyNavigationMode == .pointingAtTarget else { return }
-                self.navigationBubbleOpacity = 0.0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard self.buddyNavigationMode == .pointingAtTarget else { return }
-                    self.startFlyingBackToCursor()
-                }
-            }
+            // All characters streamed: stay on this target, then fly back (or move to the next
+            // target when the voice reaches it).
+            self.holdPointingThenFlyBack(
+                pointingSessionIdentifier: pointingSessionIdentifier,
+                holdStartedAt: Date()
+            )
         }
+    }
+
+    /// LOCAL: holds the arrow on the current target. If more targets are still coming in time with
+    /// the voice, it keeps waiting here (up to 60s) and the voice's next target takes over. When
+    /// nothing more is coming it holds for 3 seconds in total, then flies back to the cursor.
+    private func holdPointingThenFlyBack(pointingSessionIdentifier: UUID, holdStartedAt: Date) {
+        guard buddyNavigationMode == .pointingAtTarget,
+              currentPointingSessionIdentifier == pointingSessionIdentifier else { return }
+
+        let heldSeconds = Date().timeIntervalSince(holdStartedAt)
+        let isWaitingForNextSpokenTarget = companionManager.hasPendingSpeechSyncedPointTargets && heldSeconds < 60
+        if isWaitingForNextSpokenTarget || heldSeconds < 3.0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.holdPointingThenFlyBack(
+                    pointingSessionIdentifier: pointingSessionIdentifier,
+                    holdStartedAt: holdStartedAt
+                )
+            }
+            return
+        }
+
+        navigationBubbleOpacity = 0.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard self.buddyNavigationMode == .pointingAtTarget,
+                  self.currentPointingSessionIdentifier == pointingSessionIdentifier else { return }
+            self.startFlyingBackToCursor()
+        }
+    }
+
+    /// LOCAL: another screen's overlay is taking over the next target, so this one stands down
+    /// WITHOUT clearing the shared pointing state.
+    private func standDownBecauseNextTargetIsOnAnotherScreen() {
+        guard buddyNavigationMode != .followingCursor else { return }
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        currentPointingSessionIdentifier = UUID()
+        withAnimation(.easeOut(duration: 0.3)) {
+            highlightedTargetInSwiftUI = nil
+        }
+        buddyNavigationMode = .followingCursor
+        isReturningToCursor = false
+        navigationBubbleText = ""
+        navigationBubbleOpacity = 0.0
+        navigationBubbleScale = 1.0
+        triangleRotationDegrees = -35.0
+        buddyFlightScale = 1.0
     }
 
     /// Streams the navigation bubble text one character at a time with variable
@@ -633,6 +697,9 @@ struct BlueCursorView: View {
 
     /// Flies the buddy back to the current cursor position after pointing is done.
     private func startFlyingBackToCursor() {
+        withAnimation(.easeOut(duration: 0.4)) {
+            highlightedTargetInSwiftUI = nil
+        }
         let mouseLocation = NSEvent.mouseLocation
         let cursorInSwiftUI = convertScreenPointToSwiftUICoordinates(mouseLocation)
         let cursorWithTrackingOffset = CGPoint(x: cursorInSwiftUI.x + 35, y: cursorInSwiftUI.y + 25)
@@ -647,21 +714,12 @@ struct BlueCursorView: View {
         }
     }
 
-    /// Cancels an in-progress navigation because the user moved the cursor.
-    private func cancelNavigationAndResumeFollowing() {
-        navigationAnimationTimer?.invalidate()
-        navigationAnimationTimer = nil
-        navigationBubbleText = ""
-        navigationBubbleOpacity = 0.0
-        navigationBubbleScale = 1.0
-        buddyFlightScale = 1.0
-        finishNavigationAndResumeFollowing()
-    }
-
     /// Returns the buddy to normal cursor-following mode after navigation completes.
     private func finishNavigationAndResumeFollowing() {
         navigationAnimationTimer?.invalidate()
         navigationAnimationTimer = nil
+        highlightedTargetInSwiftUI = nil
+        pendingHighlightTargetInSwiftUI = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
         triangleRotationDegrees = -35.0
@@ -689,8 +747,8 @@ struct BlueCursorView: View {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     self.showWelcome = false
-                    // Start the onboarding video right after the welcome text disappears
-                    self.companionManager.setupOnboardingVideo()
+                    // Show the "press control + option and say hi" hint right after the welcome text disappears
+                    self.companionManager.showOnboardingHint()
                 }
                 return
             }
@@ -839,43 +897,111 @@ class OverlayWindowManager {
     }
 }
 
-// MARK: - Onboarding Video Player
+// MARK: - Target Highlight (LOCAL ADDITION)
 
-/// NSViewRepresentable wrapping an AVPlayerLayer so HLS video plays
-/// inside SwiftUI. Uses a custom NSView subclass to keep the player
-/// layer sized to the view's bounds automatically.
-private struct OnboardingVideoPlayerView: NSViewRepresentable {
-    let player: AVPlayer?
+/// Draws a single arrow from the buddy to just short of the exact spot Clicky is pointing at.
+/// Arrow only (no circles), and the arrow stops short of the target and sits off to one side,
+/// so the thing being pointed at is never covered. The shaft draws on, the head pops in, then
+/// the whole arrow gently nudges toward the target to draw the eye. White under-strokes keep
+/// it readable on both light and dark slides.
+struct TargetHighlightView: View {
+    let target: CGPoint
+    let buddyRestingPosition: CGPoint
 
-    func makeNSView(context: Context) -> AVPlayerNSView {
-        let view = AVPlayerNSView()
-        view.player = player
-        return view
+    @State private var arrowShaftProgress: CGFloat = 0.0
+    @State private var arrowHeadOpacity: Double = 0.0
+    @State private var arrowNudgeTowardTargetDistance: CGFloat = 0.0
+
+    private let blueStrokeStyle = StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
+    private let whiteOutlineStrokeStyle = StrokeStyle(lineWidth: 9, lineCap: .round, lineJoin: .round)
+
+    private var arrowEndpoints: (tail: CGPoint, head: CGPoint) {
+        TargetArrowLayout.arrowEndpoints(target: target, buddyRestingPosition: buddyRestingPosition)
     }
 
-    func updateNSView(_ nsView: AVPlayerNSView, context: Context) {
-        nsView.player = player
+    /// Unit vector along the arrow, from tail to head.
+    private var directionTowardTarget: CGPoint {
+        let endpoints = arrowEndpoints
+        let deltaX = endpoints.head.x - endpoints.tail.x
+        let deltaY = endpoints.head.y - endpoints.tail.y
+        let length = max(hypot(deltaX, deltaY), 0.001)
+        return CGPoint(x: deltaX / length, y: deltaY / length)
+    }
+
+    var body: some View {
+        let endpoints = arrowEndpoints
+        ZStack {
+            // Shaft draws on from the buddy toward the target
+            HighlightArrowShaftShape(tail: endpoints.tail, head: endpoints.head)
+                .trim(from: 0, to: arrowShaftProgress)
+                .stroke(Color.white, style: whiteOutlineStrokeStyle)
+
+            HighlightArrowShaftShape(tail: endpoints.tail, head: endpoints.head)
+                .trim(from: 0, to: arrowShaftProgress)
+                .stroke(DS.Colors.overlayCursorBlue, style: blueStrokeStyle)
+                .shadow(color: DS.Colors.overlayCursorBlue, radius: 6, x: 0, y: 0)
+
+            // Arrowhead appears once the shaft has arrived
+            HighlightArrowHeadShape(tail: endpoints.tail, head: endpoints.head)
+                .stroke(Color.white, style: whiteOutlineStrokeStyle)
+                .opacity(arrowHeadOpacity)
+
+            HighlightArrowHeadShape(tail: endpoints.tail, head: endpoints.head)
+                .stroke(DS.Colors.overlayCursorBlue, style: blueStrokeStyle)
+                .shadow(color: DS.Colors.overlayCursorBlue, radius: 6, x: 0, y: 0)
+                .opacity(arrowHeadOpacity)
+        }
+        .offset(
+            x: directionTowardTarget.x * arrowNudgeTowardTargetDistance,
+            y: directionTowardTarget.y * arrowNudgeTowardTargetDistance
+        )
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.4)) {
+                arrowShaftProgress = 1.0
+            }
+            withAnimation(.easeIn(duration: 0.15).delay(0.35)) {
+                arrowHeadOpacity = 1.0
+            }
+            // A small repeating nudge toward the target (max 7pt, leaving the gap intact).
+            withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true).delay(0.6)) {
+                arrowNudgeTowardTargetDistance = 7
+            }
+        }
     }
 }
 
-private class AVPlayerNSView: NSView {
-    var player: AVPlayer? {
-        didSet { playerLayer.player = player }
+private struct HighlightArrowShaftShape: Shape {
+    let tail: CGPoint
+    let head: CGPoint
+
+    func path(in rect: CGRect) -> Path {
+        var shaftPath = Path()
+        shaftPath.move(to: tail)
+        shaftPath.addLine(to: head)
+        return shaftPath
     }
+}
 
-    private let playerLayer = AVPlayerLayer()
+private struct HighlightArrowHeadShape: Shape {
+    let tail: CGPoint
+    let head: CGPoint
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        playerLayer.videoGravity = .resizeAspectFill
-        layer?.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        playerLayer.frame = bounds
+    func path(in rect: CGRect) -> Path {
+        let travelAngle = atan2(head.y - tail.y, head.x - tail.x)
+        let headLength: CGFloat = 24
+        let headSpreadAngle = CGFloat.pi / 7
+        let leftBarbPoint = CGPoint(
+            x: head.x - headLength * cos(travelAngle - headSpreadAngle),
+            y: head.y - headLength * sin(travelAngle - headSpreadAngle)
+        )
+        let rightBarbPoint = CGPoint(
+            x: head.x - headLength * cos(travelAngle + headSpreadAngle),
+            y: head.y - headLength * sin(travelAngle + headSpreadAngle)
+        )
+        var headPath = Path()
+        headPath.move(to: leftBarbPoint)
+        headPath.addLine(to: head)
+        headPath.addLine(to: rightBarbPoint)
+        return headPath
     }
 }
