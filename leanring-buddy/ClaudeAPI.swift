@@ -14,7 +14,7 @@ class ClaudeAPI {
     var model: String
     private let session: URLSession
 
-    init(proxyURL: String, model: String = "claude-sonnet-4-6") {
+    init(proxyURL: String, model: String = "anthropic/claude-haiku-5.5") {
         self.apiURL = URL(string: proxyURL)!
         self.model = model
 
@@ -41,7 +41,39 @@ class ClaudeAPI {
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // LOCAL: called directly (no local proxy); the key comes from the macOS Keychain.
+        if let openRouterKey = ThambiKeychain.read(.openRouter) {
+            request.setValue("Bearer \(openRouterKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.setValue("Thambi", forHTTPHeaderField: "X-Title")
         return request
+    }
+
+    // MARK: - Request rules (LOCAL: these used to live in the local proxy)
+
+    static let allowedModels: Set<String> = ["anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5"]
+    static let defaultModel = "anthropic/claude-haiku-5.5"
+    /// Long spoken answers fit comfortably; one bad request can't run up cost.
+    static let maximumOutputTokens = 1500
+
+    static func makeRequestBody(model requestedModel: String, systemPrompt: String, messages: [[String: Any]]) -> [String: Any] {
+        // Only the two approved models can ever be billed.
+        let model = allowedModels.contains(requestedModel) ? requestedModel : defaultModel
+        var body: [String: Any] = [
+            "model": model,
+            "max_tokens": maximumOutputTokens,
+            "stream": true,
+            // Prompt caching: the long, unchanging instructions are billed at ~10% when re-sent
+            // within a few minutes (measured: about half the cost of a Haiku question).
+            "system": [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]],
+            "messages": messages
+        ]
+        // Haiku's hidden reasoning only adds cost and delay to short spoken answers.
+        // (Sonnet 5.5 rejects this setting, so it is Haiku-only.)
+        if model == defaultModel {
+            body["thinking"] = ["type": "disabled"]
+        }
+        return body
     }
 
     /// Detects the MIME type of image data by inspecting the first bytes.
@@ -139,14 +171,12 @@ class ClaudeAPI {
         ])
         messages.append(["role": "user", "content": contentBlocks])
 
-        let body: [String: Any] = [
-            "model": model,
-            "max_tokens": 1024,
-            "stream": true,
-            "system": systemPrompt,
-            "messages": messages
-        ]
+        guard ThambiKeychain.read(.openRouter) != nil else {
+            throw NSError(domain: "ClaudeAPI", code: 401,
+                          userInfo: [NSLocalizedDescriptionKey: "No OpenRouter key in the Keychain"])
+        }
 
+        let body = Self.makeRequestBody(model: model, systemPrompt: systemPrompt, messages: messages)
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = bodyData
         let payloadMB = Double(bodyData.count) / 1_048_576.0
@@ -211,81 +241,4 @@ class ClaudeAPI {
         return (text: accumulatedResponseText, duration: duration)
     }
 
-    /// Non-streaming fallback for validation requests where we don't need progressive display.
-    func analyzeImage(
-        images: [(data: Data, label: String)],
-        systemPrompt: String,
-        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
-        userPrompt: String
-    ) async throws -> (text: String, duration: TimeInterval) {
-        let startTime = Date()
-
-        var request = makeAPIRequest()
-
-        var messages: [[String: Any]] = []
-        for (userPlaceholder, assistantResponse) in conversationHistory {
-            messages.append(["role": "user", "content": userPlaceholder])
-            messages.append(["role": "assistant", "content": assistantResponse])
-        }
-
-        // Build current message with all labeled images + prompt
-        var contentBlocks: [[String: Any]] = []
-        for image in images {
-            contentBlocks.append([
-                "type": "image",
-                "source": [
-                    "type": "base64",
-                    "media_type": detectImageMediaType(for: image.data),
-                    "data": image.data.base64EncodedString()
-                ]
-            ])
-            contentBlocks.append([
-                "type": "text",
-                "text": image.label
-            ])
-        }
-        contentBlocks.append([
-            "type": "text",
-            "text": userPrompt
-        ])
-        messages.append(["role": "user", "content": contentBlocks])
-
-        let body: [String: Any] = [
-            "model": model,
-            "max_tokens": 256,
-            "system": systemPrompt,
-            "messages": messages
-        ]
-
-        let bodyData = try JSONSerialization.data(withJSONObject: body)
-        request.httpBody = bodyData
-        let payloadMB = Double(bodyData.count) / 1_048_576.0
-        print("🌐 Claude request: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
-
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
-            )
-        }
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let content = json?["content"] as? [[String: Any]],
-              let textBlock = content.first(where: { ($0["type"] as? String) == "text" }),
-              let text = textBlock["text"] as? String else {
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid response format"]
-            )
-        }
-
-        let duration = Date().timeIntervalSince(startTime)
-        return (text: text, duration: duration)
-    }
 }
