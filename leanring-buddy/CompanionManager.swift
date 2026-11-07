@@ -10,7 +10,6 @@
 import AVFoundation
 import Combine
 import Foundation
-import PostHog
 import ScreenCaptureKit
 import SwiftUI
 
@@ -38,29 +37,18 @@ final class CompanionManager: ObservableObject {
     /// The display frame (global AppKit coords) of the screen the detected
     /// element is on, so BlueCursorView knows which screen overlay should animate.
     @Published var detectedElementDisplayFrame: CGRect?
+    /// LOCAL: busy-area map of the screen being pointed at, used to place the arrow and label where they hide the least.
+    var detectedElementLayoutMap: ScreenBusynessMap?
     /// Custom speech bubble text for the pointing animation. When set,
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
 
-    // MARK: - Onboarding Video State (shared across all screen overlays)
-
-    @Published var onboardingVideoPlayer: AVPlayer?
-    @Published var showOnboardingVideo: Bool = false
-    @Published var onboardingVideoOpacity: Double = 0.0
-    private var onboardingVideoEndObserver: NSObjectProtocol?
-    private var onboardingDemoTimeObserver: Any?
-
     // MARK: - Onboarding Prompt Bubble
 
-    /// Text streamed character-by-character on the cursor after the onboarding video ends.
+    /// Text streamed character-by-character on the cursor after the welcome message.
     @Published var onboardingPromptText: String = ""
     @Published var onboardingPromptOpacity: Double = 0.0
     @Published var showOnboardingPrompt: Bool = false
-
-    // MARK: - Onboarding Music
-
-    private var onboardingMusicPlayer: AVAudioPlayer?
-    private var onboardingMusicFadeTimer: Timer?
 
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
@@ -70,14 +58,16 @@ final class CompanionManager: ObservableObject {
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    // LOCAL SETUP: points at `wrangler dev` running on this Mac (keys live in worker/.dev.vars).
+    // LOCAL: no local proxy any more — Claude is called directly over HTTPS (key in the Keychain).
+    private static let openRouterMessagesURL = "https://openrouter.ai/api/v1/messages"
 
     private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+        return ClaudeAPI(proxyURL: Self.openRouterMessagesURL, model: ClickyModelRouter.haikuModelID)
     }()
 
-    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
-        return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
+    private lazy var systemSpeechTTSClient: SystemSpeechTTSClient = {
+        return SystemSpeechTTSClient()
     }()
 
     /// Conversation history so Claude remembers prior exchanges within a session.
@@ -107,13 +97,15 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    /// LOCAL: model mode for voice responses. "auto" (default) uses Haiku for everyday
+    /// questions and escalates to Sonnet only when needed (see ClickyModelRouter);
+    /// or the user pins Haiku / Sonnet in the panel. Persisted to UserDefaults
+    /// (new key, so any old pinned choice from before auto mode is ignored).
+    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedModelMode") ?? ClickyModelRouter.autoModeIdentifier
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
-        UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        claudeAPI.model = model
+        UserDefaults.standard.set(model, forKey: "selectedModelMode")
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -123,22 +115,6 @@ final class CompanionManager: ObservableObject {
         ? true
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
-    func setClickyCursorEnabled(_ enabled: Bool) {
-        isClickyCursorEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
-        transientHideTask?.cancel()
-        transientHideTask = nil
-
-        if enabled {
-            overlayWindowManager.hasShownOverlayBefore = true
-            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
-            isOverlayVisible = true
-        } else {
-            overlayWindowManager.hideOverlay()
-            isOverlayVisible = false
-        }
-    }
-
     /// Whether the user has completed onboarding at least once. Persisted
     /// to UserDefaults so the Start button only appears on first launch.
     var hasCompletedOnboarding: Bool {
@@ -146,35 +122,9 @@ final class CompanionManager: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
     }
 
-    /// Whether the user has submitted their email during onboarding.
-    @Published var hasSubmittedEmail: Bool = UserDefaults.standard.bool(forKey: "hasSubmittedEmail")
-
-    /// Submits the user's email to FormSpark and identifies them in PostHog.
-    func submitEmail(_ email: String) {
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedEmail.isEmpty else { return }
-
-        hasSubmittedEmail = true
-        UserDefaults.standard.set(true, forKey: "hasSubmittedEmail")
-
-        // Identify user in PostHog
-        PostHogSDK.shared.identify(trimmedEmail, userProperties: [
-            "email": trimmedEmail
-        ])
-
-        // Submit to FormSpark
-        Task {
-            var request = URLRequest(url: URL(string: "https://submit-form.com/RWbGJxmIs")!)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["email": trimmedEmail])
-            _ = try? await URLSession.shared.data(for: request)
-        }
-    }
-
     func start() {
         refreshAllPermissions()
-        print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        print("🔑 Thambi start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
         bindAudioPowerLevel()
@@ -197,7 +147,7 @@ final class CompanionManager: ObservableObject {
     /// Called by BlueCursorView after the buddy finishes its pointing
     /// animation and returns to cursor-following mode.
     /// Triggers the onboarding sequence — dismisses the panel and restarts
-    /// the overlay so the welcome animation and intro video play.
+    /// the overlay so the welcome animation plays.
     func triggerOnboarding() {
         // Post notification so the panel manager can dismiss the panel
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
@@ -206,85 +156,18 @@ final class CompanionManager: ObservableObject {
         // again on future launches — the cursor will auto-show instead
         hasCompletedOnboarding = true
 
-        ClickyAnalytics.trackOnboardingStarted()
-
-        // Play Besaid theme at 60% volume, fade out after 1m 30s
-        startOnboardingMusic()
 
         // Show the overlay for the first time — isFirstAppearance triggers
-        // the welcome animation and onboarding video
+        // the welcome animation and the onboarding hint
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
         isOverlayVisible = true
-    }
-
-    /// Replays the onboarding experience from the "Watch Onboarding Again"
-    /// footer link. Same flow as triggerOnboarding but the cursor overlay
-    /// is already visible so we just restart the welcome animation and video.
-    func replayOnboarding() {
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-        ClickyAnalytics.trackOnboardingReplayed()
-        startOnboardingMusic()
-        // Tear down any existing overlays and recreate with isFirstAppearance = true
-        overlayWindowManager.hasShownOverlayBefore = false
-        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
-        isOverlayVisible = true
-    }
-
-    private func stopOnboardingMusic() {
-        onboardingMusicFadeTimer?.invalidate()
-        onboardingMusicFadeTimer = nil
-        onboardingMusicPlayer?.stop()
-        onboardingMusicPlayer = nil
-    }
-
-    private func startOnboardingMusic() {
-        stopOnboardingMusic()
-        guard let musicURL = Bundle.main.url(forResource: "ff", withExtension: "mp3") else {
-            print("⚠️ Clicky: ff.mp3 not found in bundle")
-            return
-        }
-
-        do {
-            let player = try AVAudioPlayer(contentsOf: musicURL)
-            player.volume = 0.3
-            player.play()
-            self.onboardingMusicPlayer = player
-
-            // After 1m 30s, fade the music out over 3s
-            onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: false) { [weak self] _ in
-                self?.fadeOutOnboardingMusic()
-            }
-        } catch {
-            print("⚠️ Clicky: Failed to play onboarding music: \(error)")
-        }
-    }
-
-    private func fadeOutOnboardingMusic() {
-        guard let player = onboardingMusicPlayer else { return }
-
-        let fadeSteps = 30
-        let fadeDuration: Double = 3.0
-        let stepInterval = fadeDuration / Double(fadeSteps)
-        let volumeDecrement = player.volume / Float(fadeSteps)
-        var stepsRemaining = fadeSteps
-
-        onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { [weak self] timer in
-            stepsRemaining -= 1
-            player.volume -= volumeDecrement
-
-            if stepsRemaining <= 0 {
-                timer.invalidate()
-                player.stop()
-                self?.onboardingMusicPlayer = nil
-                self?.onboardingMusicFadeTimer = nil
-            }
-        }
     }
 
     func clearDetectedElementLocation() {
         detectedElementScreenLocation = nil
         detectedElementDisplayFrame = nil
         detectedElementBubbleText = nil
+        detectedElementLayoutMap = nil
     }
 
     func stop() {
@@ -331,13 +214,10 @@ final class CompanionManager: ObservableObject {
 
         // Track individual permission grants as they happen
         if !previouslyHadAccessibility && hasAccessibilityPermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "accessibility")
         }
         if !previouslyHadScreenRecording && hasScreenRecordingPermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "screen_recording")
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "microphone")
         }
         // Screen content permission is persisted — once the user has approved the
         // SCShareableContent picker, we don't need to re-check it.
@@ -346,7 +226,6 @@ final class CompanionManager: ObservableObject {
         }
 
         if !previouslyHadAll && allPermissionsGranted {
-            ClickyAnalytics.trackAllPermissionsGranted()
         }
     }
 
@@ -379,7 +258,6 @@ final class CompanionManager: ObservableObject {
                     guard didCapture else { return }
                     hasScreenContentPermission = true
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
-                    ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     // If onboarding was already completed, show the cursor overlay now
                     if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
@@ -474,8 +352,6 @@ final class CompanionManager: ObservableObject {
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
-            // Don't register push-to-talk while the onboarding video is playing
-            guard !showOnboardingVideo else { return }
 
             // Cancel any pending transient hide so the overlay stays visible
             transientHideTask?.cancel()
@@ -493,7 +369,7 @@ final class CompanionManager: ObservableObject {
 
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
-            elevenLabsTTSClient.stopPlayback()
+            systemSpeechTTSClient.stopPlayback()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -508,7 +384,6 @@ final class CompanionManager: ObservableObject {
             }
     
 
-            ClickyAnalytics.trackPushToTalkStarted()
 
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = Task {
@@ -520,7 +395,6 @@ final class CompanionManager: ObservableObject {
                     submitDraftText: { [weak self] finalTranscript in
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
-                        ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
                         self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                     }
                 )
@@ -530,7 +404,6 @@ final class CompanionManager: ObservableObject {
             // before the async startPushToTalk had a chance to begin recording.
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
-            ClickyAnalytics.trackPushToTalkReleased()
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
@@ -542,11 +415,12 @@ final class CompanionManager: ObservableObject {
     // MARK: - Companion Prompt
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're thambi, a friendly always-on study buddy that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
+    - the one exception to lowercase: write EVERY acronym and abbreviation in capital letters, like TCP, ESP, IKE, SMTP, RFC, API, RAM, so the voice can spell it out letter by letter. never write an acronym in lowercase, even if the user said it in lowercase or the screen shows it in lowercase (write POP3 and IMAP, not pop3 and imap). don't capitalize anything else. put digits right after the letters, like POP3.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
     - if the user's question relates to what's on their screen, reference specific things you see.
@@ -559,21 +433,25 @@ final class CompanionManager: ObservableObject {
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
 
     element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
+    you have a small blue triangle cursor that can fly to and point at things on screen, drawing an arrow at them. pointing is your best feature, so use it every single time you have a chance: whenever your answer refers to anything specific that is visible on screen — a heading, part of a diagram, a label, a number, a formula, a bullet, a button, a menu, a window — point at it. it makes your help far more useful and concrete.
 
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
+    this includes explanations. when you explain a slide, page, document, diagram or screen, walk through its important parts in order and point at each part right as you talk about it, for the whole answer, however long it gets. do NOT point at one thing near the start and then stop: keep pointing at each new thing you mention until you finish your last sentence. only skip pointing when nothing on screen relates to the question at all (a pure general-knowledge question, or small talk).
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+    when you point, put a coordinate tag RIGHT AFTER the sentence that talks about that element, so the cursor moves at the exact moment you say it (your voice and the cursor must stay in step). the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
 
     format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+
+    if the user asks about two or more things on screen (for example "show me the title and the graph", or "which one is on the left and which is on the right"), point at EACH of them: give each element its own sentence, in the order you mention them, and put that element's tag right after its sentence, like "the first thing is over here. [POINT:200,300:first thing] the second thing is over there. [POINT:900,400:second thing]". use one tag for every distinct thing you refer to, up to eight in one answer. never put several tags together at the end, and never leave out one of the things you mention. if you only point at one thing, put its tag right after the sentence that names it (usually your first sentence), then keep explaining after the tag.
 
     if pointing wouldn't help, append [POINT:none].
 
     examples:
-    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
+    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. [POINT:1100,42:color inspector] click that and you'll get all the color wheels and curves."
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
+    - user asks how to commit in xcode: "see that source control menu up top? [POINT:285,11:source control] click that and hit commit, or you can use command option c as a shortcut."
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+    - user asks to see two things: "sure. first up top is the title. [POINT:640,45:title] and then down on the right is the graph it describes. [POINT:960,420:graph]"
+    - user asks you to explain a slide: "this slide is about how email travels between two people. up top the title says it's one picture of who speaks which protocol. [POINT:640,45:title] in the middle, alice's mail goes through her server to a gateway and then to bob's server. [POINT:700,300:mail path] the box on the left explains what a mail reader does. [POINT:200,560:mail reader box] and the dark bar at the bottom gives the key takeaway, that sending always uses smtp. [POINT:640,720:takeaway]"
     """
 
     // MARK: - AI Response Pipeline
@@ -585,7 +463,8 @@ final class CompanionManager: ObservableObject {
     /// the buddy to fly to that element on screen.
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
-        elevenLabsTTSClient.stopPlayback()
+        systemSpeechTTSClient.stopPlayback()
+        pendingSpeechSyncedPointTargetCount = 0
 
         currentResponseTask = Task {
             // Stay in processing (spinner) state — no streaming text displayed
@@ -594,6 +473,17 @@ final class CompanionManager: ObservableObject {
             do {
                 // Capture all connected screens so the AI has full context
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                // LOCAL: while Claude is thinking, work out where the busy (text-heavy) parts of each
+                // screen are, so the pointing arrow and label can sit where they hide the least.
+                let busynessMapsTask = Task.detached(priority: .userInitiated) {
+                    screenCaptures.map { screenCapture in
+                        ScreenBusynessMap(
+                            imageData: screenCapture.imageData,
+                            screenSizeInPoints: CGSize(width: screenCapture.displayWidthInPoints, height: screenCapture.displayHeightInPoints)
+                        )
+                    }
+                }
 
                 guard !Task.isCancelled else { return }
 
@@ -609,6 +499,11 @@ final class CompanionManager: ObservableObject {
                 let historyForAPI = conversationHistory.map { entry in
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
+
+                // LOCAL: pick Haiku (cheap) or Sonnet (only when the question needs it) per question.
+                let modelDecision = ClickyModelRouter.chooseModel(forTranscript: transcript, selectedMode: selectedModel)
+                claudeAPI.model = modelDecision.modelID
+                print("🧭 Model routing: \(modelDecision.modelID) — \(modelDecision.reason)")
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
@@ -626,60 +521,22 @@ final class CompanionManager: ObservableObject {
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
                 let spokenText = parseResult.spokenText
 
-                // Handle element pointing if Claude returned coordinates.
-                // Switch to idle BEFORE setting the location so the triangle
-                // becomes visible and can fly to the target. Without this, the
-                // spinner hides the triangle and the flight animation is invisible.
-                let hasPointCoordinate = parseResult.coordinate != nil
-                if hasPointCoordinate {
-                    voiceState = .idle
-                }
-
-                // Pick the screen capture matching Claude's screen number,
-                // falling back to the cursor screen if not specified.
-                let targetScreenCapture: CompanionScreenCapture? = {
-                    if let screenNumber = parseResult.screenNumber,
-                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
-                        return screenCaptures[screenNumber - 1]
+                // LOCAL: pointing is now synced to the voice. Targets are resolved here, but the cursor
+                // only moves when the voice reaches the sentence that mentions each one (so the arrow
+                // lands as you hear "...and the graph is here", not 2 seconds before you hear anything).
+                let busynessMaps = await busynessMapsTask.value
+                let speechSegmentsToSpeak: [SpokenSegment] = parseResult.speechSegments.map { speechSegment in
+                    guard let pointTarget = speechSegment.target,
+                          let resolvedTarget = Self.resolvePointTarget(pointTarget, screenCaptures: screenCaptures, busynessMaps: busynessMaps) else {
+                        return SpokenSegment(text: speechSegment.text, onSegmentStartedSpeaking: nil)
                     }
-                    return screenCaptures.first(where: { $0.isCursorScreen })
-                }()
-
-                if let pointCoordinate = parseResult.coordinate,
-                   let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
-                    // (top-left origin, e.g. 1280x831). Scale to the display's
-                    // point space (e.g. 1512x982), then convert to AppKit global coords.
-                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
-                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
-                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
-                    let displayFrame = targetScreenCapture.displayFrame
-
-                    // Clamp to screenshot coordinate space
-                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-
-                    // Scale from screenshot pixels to display points
-                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-
-                    // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
-                    let appKitY = displayHeight - displayLocalY
-
-                    // Convert display-local coords to global screen coords
-                    let globalLocation = CGPoint(
-                        x: displayLocalX + displayFrame.origin.x,
-                        y: appKitY + displayFrame.origin.y
-                    )
-
-                    detectedElementScreenLocation = globalLocation
-                    detectedElementDisplayFrame = displayFrame
-                    ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
-                } else {
-                    print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
+                    return SpokenSegment(text: speechSegment.text, onSegmentStartedSpeaking: { [weak self] in
+                        self?.pointAtTargetAsVoiceReachesIt(resolvedTarget)
+                    })
                 }
+                let syncedTargetLabels = parseResult.speechSegments.compactMap { $0.target.map { "\"\($0.label ?? "element")\"" } }
+                pendingSpeechSyncedPointTargetCount = syncedTargetLabels.count
+                print("🎯 Element pointing: \(syncedTargetLabels.count) target(s) synced to the voice \(syncedTargetLabels.joined(separator: " → "))")
 
                 // Save this exchange to conversation history (with the point tag
                 // stripped so it doesn't confuse future context)
@@ -695,27 +552,34 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
-                ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
-                if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Nothing to say (tag-only answer): point right away instead of waiting for a voice.
+                    speechSegmentsToSpeak.first(where: { $0.onSegmentStartedSpeaking != nil })?.onSegmentStartedSpeaking?()
+                } else {
                     do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
+                        try await systemSpeechTTSClient.speakSegments(
+                            speechSegmentsToSpeak,
+                            onSpeechFinished: { [weak self] in self?.pendingSpeechSyncedPointTargetCount = 0 }
+                        )
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
+                    } catch is CancellationError {
+                        // The user spoke again while the voice was starting: an interruption, not an error.
                     } catch {
-                        ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                        print("⚠️ Voice error: \(error)")
+                        speakErrorFallback()
                     }
                 }
             } catch is CancellationError {
                 // User spoke again — response was interrupted
+            } catch let urlError as URLError where urlError.code == .cancelled {
+                // The in-flight request was cancelled because the user spoke again; not an error.
             } catch {
-                ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                speakErrorFallback()
             }
 
             if !Task.isCancelled {
@@ -735,7 +599,7 @@ final class CompanionManager: ObservableObject {
         transientHideTask?.cancel()
         transientHideTask = Task {
             // Wait for TTS audio to finish playing
-            while elevenLabsTTSClient.isPlaying {
+            while systemSpeechTTSClient.isPlaying {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
             }
@@ -755,142 +619,283 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Speaks a hardcoded error message using macOS system TTS when API
-    /// credits run out. Uses NSSpeechSynthesizer so it works even when
-    /// ElevenLabs is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+    /// Speaks a short, neutral apology with the built-in macOS voice when getting or speaking an
+    /// answer fails for a real reason (the actual error is printed to the log).
+    private func speakErrorFallback() {
+        let utterance = "Sorry, I couldn't get an answer just now. Please try again."
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
     }
 
+    // MARK: - Shut down completely (LOCAL ADDITION)
+
+    /// The "Shut down & remove access" button: stops Thambi's voice server,
+    /// removes Thambi's Screen Recording, Accessibility, Microphone and Input Monitoring permissions,
+    /// and quits. Afterwards nothing of Clicky is running or allowed to see or hear anything; the next
+    /// launch asks for the permissions again.
+    func shutDownCompletelyAndRemovePermissions() {
+        currentResponseTask?.cancel()
+        systemSpeechTTSClient.stopPlayback()
+
+        let helperResults = ClickyShutdown.stopHelperProcesses(matching: ClickyShutdown.defaultHelperProcessPatterns())
+        let permissionResults = ClickyShutdown.removePermissions(forBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.dharoon.thambi")
+        for result in helperResults + permissionResults {
+            print("🔒 Shutdown: \(result.description) — \(result.succeeded ? "ok" : "FAILED")")
+        }
+
+        NSApp.terminate(nil)
+    }
+
     // MARK: - Point Tag Parsing
 
-    /// Result of parsing a [POINT:...] tag from Claude's response.
-    struct PointingParseResult {
-        /// The response text with the [POINT:...] tag removed — this is what gets spoken.
-        let spokenText: String
-        /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
-        let coordinate: CGPoint?
-        /// Short label describing the element (e.g. "run button"), or "none".
-        let elementLabel: String?
+    /// One element Claude wants to point at (LOCAL: Claude may now return several, in order).
+    struct PointTarget {
+        let coordinate: CGPoint
+        let label: String?
         /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
         let screenNumber: Int?
     }
 
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
-    /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
+    /// A piece of the spoken answer, optionally carrying a target to point at the moment the
+    /// voice starts saying it (LOCAL: this is what keeps the cursor and the voice in sync).
+    struct SpeechSegment {
+        let text: String
+        let target: PointTarget?
+    }
+
+    /// Result of parsing the [POINT:...] tag(s) from Claude's response.
+    struct PointingParseResult {
+        /// The response text with every [POINT:...] tag removed — this is what gets spoken.
+        let spokenText: String
+        /// The FIRST target's pixel coordinate, or nil if Claude said "none" or no tag was found.
+        let coordinate: CGPoint?
+        /// The FIRST target's label (e.g. "run button"), or "none".
+        let elementLabel: String?
+        /// The FIRST target's screen (1-based), or nil to default to cursor screen.
+        let screenNumber: Int?
+        /// LOCAL: any further targets, in the order Claude mentioned them.
+        let additionalTargets: [PointTarget]
+        /// LOCAL: the answer cut into voice-ordered pieces; each piece's target fires when the voice reaches it.
+        let speechSegments: [SpeechSegment]
+    }
+
+    /// Maximum number of elements Clicky will point at for one answer.
+    static let maximumPointTargetsPerAnswer = 8
+
+    /// Parses every [POINT:x,y:label:screenN] / [POINT:none] tag in Claude's response, wherever it
+    /// appears. Returns the spoken text (all tags removed), the targets, and the answer cut into
+    /// segments so each target can be pointed at exactly when the voice reaches its sentence.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+        func resultWithoutTargets(spokenText: String, elementLabel: String?) -> PointingParseResult {
+            PointingParseResult(
+                spokenText: spokenText, coordinate: nil, elementLabel: elementLabel, screenNumber: nil,
+                additionalTargets: [],
+                speechSegments: spokenText.isEmpty ? [] : [SpeechSegment(text: spokenText, target: nil)]
+            )
+        }
 
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
+        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2].
+        // Groups: 2 = x, 3 = y, 4 = label, 5 = screen number (group 1 is the whole alternative).
+        let pattern = #"\[POINT:(none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]"#
+
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return resultWithoutTargets(spokenText: responseText, elementLabel: nil)
+        }
+        let fullRange = NSRange(responseText.startIndex..., in: responseText)
+        let tagMatches = regex.matches(in: responseText, options: [], range: fullRange)
+
+        guard !tagMatches.isEmpty else {
             // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
+            return resultWithoutTargets(spokenText: responseText, elementLabel: nil)
         }
 
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Check if it's [POINT:none]
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: responseText),
-              let yRange = Range(match.range(at: 2), in: responseText),
-              let x = Double(responseText[xRange]),
-              let y = Double(responseText[yRange]) else {
-            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
+        func tidied(_ text: String) -> String {
+            text.replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        var elementLabel: String? = nil
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
-            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+        // 1. Walk the tags, cutting the text into (text before the tag, that tag's target) pieces.
+        struct RawPiece {
+            var text: String
+            var target: PointTarget?
+        }
+        var rawPieces: [RawPiece] = []
+        var pieceStart = responseText.startIndex
+        var acceptedTargetCount = 0
+        for tagMatch in tagMatches {
+            guard let tagRange = Range(tagMatch.range, in: responseText) else { continue }
+            let textBeforeTag = tidied(String(responseText[pieceStart..<tagRange.lowerBound]))
+            pieceStart = tagRange.upperBound
+
+            var target: PointTarget? = nil
+            if acceptedTargetCount < maximumPointTargetsPerAnswer,
+               let xRange = Range(tagMatch.range(at: 2), in: responseText),
+               let yRange = Range(tagMatch.range(at: 3), in: responseText),
+               let x = Double(responseText[xRange]),
+               let y = Double(responseText[yRange]) {
+                var elementLabel: String? = nil
+                if let labelRange = Range(tagMatch.range(at: 4), in: responseText) {
+                    elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+                }
+                var screenNumber: Int? = nil
+                if let screenRange = Range(tagMatch.range(at: 5), in: responseText) {
+                    screenNumber = Int(responseText[screenRange])
+                }
+                target = PointTarget(coordinate: CGPoint(x: x, y: y), label: elementLabel, screenNumber: screenNumber)
+                acceptedTargetCount += 1
+            }
+            rawPieces.append(RawPiece(text: textBeforeTag, target: target))
+        }
+        let trailingText = tidied(String(responseText[pieceStart...]))
+        if !trailingText.isEmpty {
+            rawPieces.append(RawPiece(text: trailingText, target: nil))
         }
 
-        var screenNumber: Int? = nil
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
-            screenNumber = Int(responseText[screenRange])
+        // 2. A tag with no sentence of its own (e.g. several tags stacked at the end) joins the
+        //    previous piece; those stacked targets are then spread across that piece's sentences
+        //    so the cursor still moves as the voice goes.
+        struct Block {
+            var text: String
+            var targets: [PointTarget]
+        }
+        var blocks: [Block] = []
+        for piece in rawPieces {
+            if piece.text.isEmpty {
+                guard let target = piece.target else { continue }
+                if blocks.isEmpty {
+                    blocks.append(Block(text: "", targets: [target]))
+                } else {
+                    blocks[blocks.count - 1].targets.append(target)
+                }
+            } else {
+                blocks.append(Block(text: piece.text, targets: piece.target.map { [$0] } ?? []))
+            }
         }
 
+        var speechSegments: [SpeechSegment] = []
+        for block in blocks {
+            if block.targets.count <= 1 || block.text.isEmpty {
+                speechSegments.append(SpeechSegment(text: block.text, target: block.targets.first))
+                continue
+            }
+            var sentences = SpeechSentenceSplitter.sentences(in: block.text)
+            if sentences.isEmpty { sentences = [block.text] }
+
+            var targetBySentenceIndex: [Int: PointTarget] = [:]
+            var nextFreeSentenceIndex = 0
+            for (targetOffset, target) in block.targets.enumerated() {
+                let evenlySpreadIndex = targetOffset * sentences.count / block.targets.count
+                let chosenIndex = max(evenlySpreadIndex, nextFreeSentenceIndex)
+                guard chosenIndex < sentences.count else {
+                    print("⚠️ Pointing: more targets than sentences; dropping \"\(target.label ?? "element")\"")
+                    continue
+                }
+                targetBySentenceIndex[chosenIndex] = target
+                nextFreeSentenceIndex = chosenIndex + 1
+            }
+            for (sentenceIndex, sentence) in sentences.enumerated() {
+                speechSegments.append(SpeechSegment(text: sentence, target: targetBySentenceIndex[sentenceIndex]))
+            }
+        }
+
+        let pointTargets = speechSegments.compactMap { $0.target }
+        let spokenText = tidied(speechSegments.map(\.text).filter { !$0.isEmpty }.joined(separator: " "))
+
+        guard let firstTarget = pointTargets.first else {
+            return PointingParseResult(
+                spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil,
+                additionalTargets: [], speechSegments: spokenText.isEmpty ? [] : [SpeechSegment(text: spokenText, target: nil)]
+            )
+        }
         return PointingParseResult(
             spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
-            elementLabel: elementLabel,
-            screenNumber: screenNumber
+            coordinate: firstTarget.coordinate,
+            elementLabel: firstTarget.label,
+            screenNumber: firstTarget.screenNumber,
+            additionalTargets: Array(pointTargets.dropFirst()),
+            speechSegments: speechSegments
         )
     }
 
-    // MARK: - Onboarding Video
+    // MARK: - Multi-target pointing (LOCAL ADDITION)
 
-    /// Sets up the onboarding video player, starts playback, and schedules
-    /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
-    func setupOnboardingVideo() {
-        guard let videoURL = URL(string: "https://stream.mux.com/e5jB8UuSrtFABVnTHCR7k3sIsmcUHCyhtLu1tzqLlfs.m3u8") else { return }
-
-        let player = AVPlayer(url: videoURL)
-        player.isMuted = false
-        player.volume = 0.0
-        self.onboardingVideoPlayer = player
-        self.showOnboardingVideo = true
-        self.onboardingVideoOpacity = 0.0
-
-        // Start playback immediately — the video plays while invisible,
-        // then we fade in both the visual and audio over 1s.
-        player.play()
-
-        // Wait for SwiftUI to mount the view, then set opacity to 1.
-        // The .animation modifier on the view handles the actual animation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.onboardingVideoOpacity = 1.0
-            // Fade audio volume from 0 → 1 over 2s to match visual fade
-            self.fadeInVideoAudio(player: player, targetVolume: 1.0, duration: 2.0)
-        }
-
-        // At 40 seconds into the video, trigger the onboarding demo where
-        // Clicky flies to something interesting on screen and comments on it
-        let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
-        onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
-            forTimes: [NSValue(time: demoTriggerTime)],
-            queue: .main
-        ) { [weak self] in
-            ClickyAnalytics.trackOnboardingDemoTriggered()
-            self?.performOnboardingDemoInteraction()
-        }
-
-        // Fade out and clean up when the video finishes
-        onboardingVideoEndObserver = NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.didPlayToEndTimeNotification,
-            object: player.currentItem,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            ClickyAnalytics.trackOnboardingVideoCompleted()
-            self.onboardingVideoOpacity = 0.0
-            // Wait for the 2s fade-out animation to complete before tearing down
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.tearDownOnboardingVideo()
-                // After the video disappears, stream in the prompt to try talking
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.startOnboardingPromptStream()
-                }
-            }
-        }
+    /// A point target already converted to real screen coordinates, ready for the overlay.
+    struct ResolvedPointTarget {
+        let globalLocation: CGPoint
+        let displayFrame: CGRect
+        let label: String?
+        /// Where the busy parts of that screen are, for content-aware arrow placement (may be nil).
+        let layoutMap: ScreenBusynessMap?
     }
 
-    func tearDownOnboardingVideo() {
-        showOnboardingVideo = false
-        if let timeObserver = onboardingDemoTimeObserver {
-            onboardingVideoPlayer?.removeTimeObserver(timeObserver)
-            onboardingDemoTimeObserver = nil
-        }
-        onboardingVideoPlayer?.pause()
-        onboardingVideoPlayer = nil
-        if let observer = onboardingVideoEndObserver {
-            NotificationCenter.default.removeObserver(observer)
-            onboardingVideoEndObserver = nil
-        }
+    /// How many targets of the answer being spoken have not been pointed at yet. While this is above
+    /// zero the overlay stays on the current target (instead of flying back) until the voice reaches the next one.
+    private(set) var pendingSpeechSyncedPointTargetCount = 0
+
+    var hasPendingSpeechSyncedPointTargets: Bool { pendingSpeechSyncedPointTargetCount > 0 }
+
+    /// Called by the voice the moment it starts saying the sentence that mentions this target.
+    private func pointAtTargetAsVoiceReachesIt(_ target: ResolvedPointTarget) {
+        pendingSpeechSyncedPointTargetCount = max(0, pendingSpeechSyncedPointTargetCount - 1)
+        detectedElementBubbleText = target.label
+        detectedElementLayoutMap = target.layoutMap
+        detectedElementScreenLocation = target.globalLocation
+        detectedElementDisplayFrame = target.displayFrame
+        print("🎯 Pointing at \"\(target.label ?? "element")\" as the voice reaches it")
+    }
+
+    /// Converts a point target (screenshot pixel space, top-left origin) into global AppKit screen
+    /// coordinates, picking the screen Claude named or falling back to the cursor's screen.
+    private static func resolvePointTarget(
+        _ pointTarget: PointTarget,
+        screenCaptures: [CompanionScreenCapture],
+        busynessMaps: [ScreenBusynessMap?]
+    ) -> ResolvedPointTarget? {
+        let targetScreenIndex: Int? = {
+            if let screenNumber = pointTarget.screenNumber,
+               screenNumber >= 1 && screenNumber <= screenCaptures.count {
+                return screenNumber - 1
+            }
+            return screenCaptures.firstIndex(where: { $0.isCursorScreen })
+        }()
+        guard let targetScreenIndex else { return nil }
+        let targetScreenCapture = screenCaptures[targetScreenIndex]
+        let layoutMap = targetScreenIndex < busynessMaps.count ? busynessMaps[targetScreenIndex] : nil
+
+        // Claude's coordinates are in the screenshot's pixel space (top-left origin, e.g. 1280x831).
+        // Scale to the display's point space (e.g. 1512x982), then convert to AppKit global coords.
+        let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
+        let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
+        let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
+        let displayFrame = targetScreenCapture.displayFrame
+
+        // Clamp to screenshot coordinate space
+        let clampedX = max(0, min(pointTarget.coordinate.x, screenshotWidth))
+        let clampedY = max(0, min(pointTarget.coordinate.y, screenshotHeight))
+
+        // Scale from screenshot pixels to display points
+        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+
+        // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
+        let appKitY = displayHeight - displayLocalY
+
+        return ResolvedPointTarget(
+            globalLocation: CGPoint(x: displayLocalX + displayFrame.origin.x, y: appKitY + displayFrame.origin.y),
+            displayFrame: displayFrame,
+            label: pointTarget.label,
+            layoutMap: layoutMap
+        )
+    }
+
+    // MARK: - Onboarding Hint
+
+    /// LOCAL: shown right after the welcome message (this replaces the intro video):
+    /// "press control + option and introduce yourself".
+    func showOnboardingHint() {
+        startOnboardingPromptStream()
     }
 
     private func startOnboardingPromptStream() {
@@ -923,104 +928,6 @@ final class CompanionManager: ObservableObject {
             let index = message.index(message.startIndex, offsetBy: currentIndex)
             self.onboardingPromptText.append(message[index])
             currentIndex += 1
-        }
-    }
-
-    /// Gradually raises an AVPlayer's volume from its current level to the
-    /// target over the specified duration, creating a smooth audio fade-in.
-    private func fadeInVideoAudio(player: AVPlayer, targetVolume: Float, duration: Double) {
-        let steps = 20
-        let stepInterval = duration / Double(steps)
-        let volumeIncrement = (targetVolume - player.volume) / Float(steps)
-        var stepsRemaining = steps
-
-        Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { timer in
-            stepsRemaining -= 1
-            player.volume += volumeIncrement
-
-            if stepsRemaining <= 0 {
-                timer.invalidate()
-                player.volume = targetVolume
-            }
-        }
-    }
-
-    // MARK: - Onboarding Demo Interaction
-
-    private static let onboardingDemoSystemPrompt = """
-    you're clicky, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
-
-    make a short quirky 3-6 word observation about the specific thing you picked — something fun, playful, or curious that shows you actually read/recognized it. no emojis ever. NEVER quote or repeat text you see on screen — just react to it. keep it to 6 words max, no exceptions.
-
-    CRITICAL COORDINATE RULE: you MUST only pick elements near the CENTER of the screen. your x coordinate must be between 20%-80% of the image width. your y coordinate must be between 20%-80% of the image height. do NOT pick anything in the top 20%, bottom 20%, left 20%, or right 20% of the screen. no menu bar items, no dock icons, no sidebar items, no items near any edge. only things clearly in the middle area of the screen. if the only interesting things are near the edges, pick something boring in the center instead.
-
-    respond with ONLY your short comment followed by the coordinate tag. nothing else. all lowercase.
-
-    format: your comment [POINT:x,y:label]
-
-    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
-    """
-
-    /// Captures a screenshot and asks Claude to find something interesting to
-    /// point at, then triggers the buddy's flight animation. Used during
-    /// onboarding to demo the pointing feature while the intro video plays.
-    func performOnboardingDemoInteraction() {
-        // Don't interrupt an active voice response
-        guard voiceState == .idle || voiceState == .responding else { return }
-
-        Task {
-            do {
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-
-                // Only send the cursor screen so Claude can't pick something
-                // on a different monitor that we can't point at.
-                guard let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) else {
-                    print("🎯 Onboarding demo: no cursor screen found")
-                    return
-                }
-
-                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
-                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.onboardingDemoSystemPrompt,
-                    userPrompt: "look around my screen and find something interesting to point at",
-                    onTextChunk: { _ in }
-                )
-
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-
-                guard let pointCoordinate = parseResult.coordinate else {
-                    print("🎯 Onboarding demo: no element to point at")
-                    return
-                }
-
-                let screenshotWidth = CGFloat(cursorScreenCapture.screenshotWidthInPixels)
-                let screenshotHeight = CGFloat(cursorScreenCapture.screenshotHeightInPixels)
-                let displayWidth = CGFloat(cursorScreenCapture.displayWidthInPoints)
-                let displayHeight = CGFloat(cursorScreenCapture.displayHeightInPoints)
-                let displayFrame = cursorScreenCapture.displayFrame
-
-                let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-                let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-                let appKitY = displayHeight - displayLocalY
-                let globalLocation = CGPoint(
-                    x: displayLocalX + displayFrame.origin.x,
-                    y: appKitY + displayFrame.origin.y
-                )
-
-                // Set custom bubble text so the pointing animation uses Claude's
-                // comment instead of a random phrase
-                detectedElementBubbleText = parseResult.spokenText
-                detectedElementScreenLocation = globalLocation
-                detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
-            } catch {
-                print("⚠️ Onboarding demo error: \(error)")
-            }
         }
     }
 }
