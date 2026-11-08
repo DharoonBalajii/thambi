@@ -1,0 +1,38 @@
+{
+  "configurations" : [
+    {
+      "id" : "862CD229-50D5-42E4-913F-FADA0D437765",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:leanring-buddy.xcodeproj",
+      "identifier" : "28F22CBE2F56440300A0FC59",
+      "name" : "leanring-buddy"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:leanring-buddy.xcodeproj",
+        "identifier" : "28F22CCB2F56440300A0FC59",
+        "name" : "leanring-buddyTests"
+      }
+    },
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:leanring-buddy.xcodeproj",
+        "identifier" : "28F22CD52F56440300A0FC59",
+        "name" : "leanring-buddyUITests"
+      }
+    }
+  ],
+  "version" : 1
+}
