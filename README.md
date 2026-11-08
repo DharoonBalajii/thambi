@@ -1,4 +1,4 @@
-# Thambi 🫶
+# Thambi 
 
 *Thambi* (தம்பி) is Tamil for "little brother", the one who sits next to you during exam prep and actually explains the slide instead of just staring at it with you.
 
