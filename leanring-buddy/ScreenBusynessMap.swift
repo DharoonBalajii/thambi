@@ -16,7 +16,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-final class ScreenBusynessMap: @unchecked Sendable {
+nonisolated final class ScreenBusynessMap: @unchecked Sendable {
     let screenSizeInPoints: CGSize
     private let columnCount: Int
     private let rowCount: Int

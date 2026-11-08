@@ -53,6 +53,8 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    /// The movable notes box for summaries / key points the user asks to write down.
+    let notesPanelController = NotesPanelController()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -123,6 +125,30 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "ThambiShowSampleNotes") {
+            notesPanelController.show(markdown: "## Sample notes\n- **IPsec** is a *framework*, not one protocol\n  - **ESP** gives confidentiality\n  - **AH** gives integrity only\n1. Pick algorithms\n2. Negotiate keys with **IKE**", screenCaptures: [])
+        }
+        // Test hook: ask a typed question about an image file and save the raw answer, then quit.
+        if let debugQuestion = UserDefaults.standard.string(forKey: "ThambiDebugQuestion"),
+           let debugImagePath = UserDefaults.standard.string(forKey: "ThambiDebugImage"),
+           let debugOutputPath = UserDefaults.standard.string(forKey: "ThambiDebugOutput"),
+           let debugImageData = FileManager.default.contents(atPath: debugImagePath),
+           let debugImageRep = NSBitmapImageRep(data: debugImageData) {
+            let label = "screen 1 of 1 — cursor is on this screen (primary focus) (image dimensions: \(debugImageRep.pixelsWide)x\(debugImageRep.pixelsHigh) pixels)"
+            Task { @MainActor in
+                claudeAPI.model = ClickyModelRouter.haikuModelID
+                let answer = (try? await claudeAPI.analyzeImageStreaming(
+                    images: [(data: debugImageData, label: label)],
+                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    userPrompt: debugQuestion,
+                    onTextChunk: { _ in }
+                ).text) ?? "ERROR: request failed"
+                try? answer.write(toFile: debugOutputPath, atomically: true, encoding: .utf8)
+                NSApp.terminate(nil)
+            }
+        }
+        #endif
         refreshAllPermissions()
         print("🔑 Thambi start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
@@ -432,6 +458,13 @@ final class CompanionManager: ObservableObject {
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
 
+    notes box:
+    only when the user's request contains the word "write" (write, writing, written, wrote), for example "write down the key points", "write a summary of this slide", "write that down", also write it out for them: a summary, key points, notes, definitions, formulas or steps to copy. put the written version inside [NOTES] and [/NOTES] at the very end of your answer. it appears in a notes box on their screen so they can copy it into their own notes.
+    - inside the notes box ONLY, use simple markdown: an optional short "## heading", "- " bullet points (indent two spaces for sub-points), "1. " numbered steps, and **bold** for key terms. normal capitalization is fine there. keep it concise, accurate and exam-ready, based on what is on screen.
+    - outside the notes, say just one or two short sentences, like "done, i've written the key points for you." the box opens when you finish speaking. never read the notes aloud.
+    - never put [POINT:...] tags inside the notes. you can still point while you speak, with the tags in your spoken sentences as usual.
+    - if the request doesn't say "write" (for example "summarize this slide" or "explain this"), never add notes; just answer by voice as usual.
+
     element pointing:
     you have a small blue triangle cursor that can fly to and point at things on screen, drawing an arrow at them. pointing is your best feature, so use it every single time you have a chance: whenever your answer refers to anything specific that is visible on screen — a heading, part of a diagram, a label, a number, a formula, a bullet, a button, a menu, a window — point at it. it makes your help far more useful and concrete.
 
@@ -517,8 +550,20 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Notes box: the written part is never spoken. It is shown only if the user said
+                // "write" (e.g. "write down the key points"), and only once the voice has finished.
+                let notesExtraction = NotesMarkdown.extractNotes(from: fullResponseText)
+                let notesToShow = NotesMarkdown.userAskedToWrite(transcript) ? notesExtraction.notes : nil
+                if notesExtraction.notes != nil && notesToShow == nil {
+                    print("📝 Notes dropped: the question didn't say \"write\"")
+                }
+                let showNotesNow: @MainActor () -> Void = { [weak self] in
+                    guard let self, let notesMarkdown = notesToShow else { return }
+                    self.notesPanelController.show(markdown: notesMarkdown, screenCaptures: screenCaptures)
+                    print("📝 Notes box: \(notesMarkdown.count) chars")
+                }
+
+                let parseResult = Self.parsePointingCoordinates(from: notesExtraction.spokenText)
                 let spokenText = parseResult.spokenText
 
                 // LOCAL: pointing is now synced to the voice. Targets are resolved here, but the cursor
@@ -542,7 +587,7 @@ final class CompanionManager: ObservableObject {
                 // stripped so it doesn't confuse future context)
                 conversationHistory.append((
                     userTranscript: transcript,
-                    assistantResponse: spokenText
+                    assistantResponse: notesToShow.map { spokenText + "\n[NOTES]\n" + $0 + "\n[/NOTES]" } ?? spokenText
                 ))
 
                 // Keep only the last 10 exchanges to avoid unbounded context growth
@@ -558,11 +603,17 @@ final class CompanionManager: ObservableObject {
                 if spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Nothing to say (tag-only answer): point right away instead of waiting for a voice.
                     speechSegmentsToSpeak.first(where: { $0.onSegmentStartedSpeaking != nil })?.onSegmentStartedSpeaking?()
+                    showNotesNow()
                 } else {
                     do {
+                        // An interrupted answer (you asked something else) never fires this, so stale
+                        // notes don't pop up over the new answer.
                         try await systemSpeechTTSClient.speakSegments(
                             speechSegmentsToSpeak,
-                            onSpeechFinished: { [weak self] in self?.pendingSpeechSyncedPointTargetCount = 0 }
+                            onSpeechFinished: { [weak self] in
+                                self?.pendingSpeechSyncedPointTargetCount = 0
+                                showNotesNow()
+                            }
                         )
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
@@ -571,6 +622,7 @@ final class CompanionManager: ObservableObject {
                     } catch {
                         print("⚠️ Voice error: \(error)")
                         speakErrorFallback()
+                        showNotesNow()  // the voice failed, but the written notes are still good
                     }
                 }
             } catch is CancellationError {
@@ -635,6 +687,7 @@ final class CompanionManager: ObservableObject {
     /// and quits. Afterwards nothing of Clicky is running or allowed to see or hear anything; the next
     /// launch asks for the permissions again.
     func shutDownCompletelyAndRemovePermissions() {
+        notesPanelController.close()
         currentResponseTask?.cancel()
         systemSpeechTTSClient.stopPlayback()
 
