@@ -1,173 +1,104 @@
-## Get HeyClicky for Mac and Windows
+# Thambi 🫶
 
-The official app is **[HeyClicky](https://www.heyclicky.com/)**, an AI buddy for Mac and Windows, made by me and the team.
+*Thambi* (தம்பி) is Tamil for "little brother", the one who sits next to you during exam prep and actually explains the slide instead of just staring at it with you.
 
-- **Mac:** [download HeyClicky for Mac](https://www.heyclicky.com/for-mac) (macOS 14.2 or later)
-- **Windows:** [download HeyClicky for Windows](https://www.heyclicky.com/for-windows) (Windows 10 and 11)
+It lives in your Mac's menu bar. You hold a key, ask a question out loud, and it:
 
-Those are the only official downloads. Other Windows apps built from this repo are community ports, not made by us.
+- 👀 **looks at your screen** (only when you ask, never in the background)
+- 🗣️ **answers out loud** in a voice that runs entirely on your Mac
+- 👉 **points at stuff** with an arrow, right as it says "...and *this* box here is the security association"
+
+Basically a TA who never sighs when you ask the same question twice.
 
 ---
 
-Update: April 27, 2026.
+## How it feels
 
-Hi there! I'm Farza, the guy that made Clicky.
+1. Open your lecture slides at 1 a.m.
+2. Hold **Control + Option**, say *"explain this slide simply"*.
+3. Let go. Thambi reads the slide, starts talking within a couple of seconds, and the arrow hops from the title to the diagram to the takeaway box as it explains each one.
 
-The existing codebase remains open source. Tinker with it, make it yours, start a company out of it, do whatever you want I don't mind. But, for all the new stuff I'm hacking on, gonna keep it private. To get the latest version, HeyClicky for Mac or Windows, go to [heyclicky.com](https://www.heyclicky.com/).
+Ask *"show me the ESP box and the IKE box"* and it points at both, in order. And yes, it says "E S P", not "esp". Every abbreviation gets spelled out letter by letter, because "ike" is not a word and we all deserve better.
 
-I also tweeted about this [here](https://x.com/FarzaTV/status/2043402737828962489).
+## What's under the hood
 
-Go crazy with this repo!! It's an MIT license.
+| Thambi's job | How it pulls it off |
+|---|---|
+| Hearing you | Push-to-talk. The mic starts the instant you press the keys, so your first words never get eaten. Transcription by AssemblyAI (or Apple's on-device speech if you'd rather nothing leave your Mac). |
+| Seeing | One screenshot per screen, only when you press the hotkey. |
+| Thinking | Claude through OpenRouter. **Haiku** for everyday questions, **Sonnet** only when you say things like "step by step", "derive", "solve" or "that's wrong, try again". |
+| Talking | A local neural voice (Qwen3-TTS via `mlx-audio`) on your Mac's GPU, sentence by sentence with natural pauses, a bit faster than normal so it doesn't sound like it's reading a will. Falls back to the macOS voice if the local one isn't running. |
+| Pointing | Arrows fire exactly when the voice reaches the sentence about that thing. They're placed by scanning the screenshot for empty space, so they don't cover the text you're trying to read. Moving your mouse doesn't interrupt them. |
 
-# Hi, this is Clicky.
-It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
+## Cheap. Like, really cheap.
 
-Download HeyClicky for free for [Mac](https://www.heyclicky.com/for-mac) or [Windows](https://www.heyclicky.com/for-windows).
+| What you ask | Roughly costs |
+|---|---|
+| "Where's the formula?" (Haiku) | ~₹0.02 |
+| "Explain this slide" (Haiku) | ~₹0.02–0.04 |
+| "Walk me through this step by step" (Sonnet) | ~₹0.7–1.4 |
+| The voice | ₹0, forever (it's on your Mac) |
 
-Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
+The trick: Thambi's long instructions are **prompt-cached**, so after your first question they're billed at about a tenth of the price. A whole night of revision costs less than the chai you'll drink during it.
 
-![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
+## Privacy, because it can see your screen
 
-This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
+- No analytics. No tracking. No auto-updater. Doesn't sneak into your login items.
+- Your voice goes to AssemblyAI, and your screenshot plus question go to OpenRouter. That's the whole list.
+- API keys live in the **macOS Keychain**: encrypted, this Mac only, never synced, readable only by Thambi.
+- Nothing gets cached to disk.
+- The voice server only listens on `127.0.0.1`, runs offline, and quits on its own if Thambi does.
+- Done studying? Hit **Shut down & remove access** in the panel. It stops the voice, takes back Thambi's Screen Recording, Accessibility and Microphone permissions, and quits. Thambi then can't see or hear anything until you say so again.
 
-## Get started with Claude Code
+## Setting it up
 
-The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+You'll need: a Mac with Apple Silicon on macOS 14.2+, Xcode, an [OpenRouter](https://openrouter.ai) key, and an [AssemblyAI](https://www.assemblyai.com) key (it comes with free credit).
 
-Once you get Claude running, paste this:
+**1. Give it your keys.** Make a file at `~/clicky/thambi-keys.env`:
 
 ```
-Hi Claude.
-
-Clone https://github.com/farzaa/clicky.git into my current directory.
-
-Then read the CLAUDE.md. I want to get Clicky running locally on my Mac.
-
-Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
+OPENROUTER_API_KEY=your-key-here
+ASSEMBLYAI_API_KEY=your-key-here
 ```
 
-That's it. It'll clone the repo, read the docs, and walk you through the whole setup. Once you're running you can just keep talking to it — build features, fix bugs, whatever. Go crazy.
+The first time Thambi opens, it moves them into the Keychain and **deletes this file**. Same trick if you ever need to change a key.
 
-## Manual setup
-
-If you want to do it yourself, here's the deal.
-
-### Prerequisites
-
-- macOS 14.2+ (for ScreenCaptureKit)
-- Xcode 15+
-- Node.js 18+ (for the Cloudflare Worker)
-- A [Cloudflare](https://cloudflare.com) account (free tier works)
-- API keys for: [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io)
-
-### 1. Set up the Cloudflare Worker
-
-The Worker is a tiny proxy that holds your API keys. The app talks to the Worker, the Worker talks to the APIs. This way your keys never ship in the app binary.
+**2. Set up the voice** (optional, but the robot voice is sad):
 
 ```bash
-cd worker
-npm install
+mkdir -p ~/clicky/tts && cp voice-server/server.py voice-server/config.json ~/clicky/tts/
+cd ~/clicky/tts && python3 -m venv venv && venv/bin/pip install --only-binary=:all: -r /path/to/this/repo/voice-server/requirements.txt
 ```
 
-Now add your secrets. Wrangler will prompt you to paste each one:
+The voice model (~2 GB) downloads on first run, then everything works offline. Want a different voice or speed? Edit `config.json` (try `"voice": "serena"` or `"speed": 1.2`).
 
-```bash
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put ASSEMBLYAI_API_KEY
-npx wrangler secret put ELEVENLABS_API_KEY
-```
+**3. Build it.** Open `leanring-buddy.xcodeproj` (yes, "leanring". It's a long story and the folder name stays), pick your own signing team (a free Apple ID works), and build. Copy `Thambi.app` into your Applications folder.
 
-For the ElevenLabs voice ID, open `wrangler.toml` and set it there (it's not sensitive):
+> Use a real signing team. With "Sign to Run Locally", macOS forgets Thambi's permissions every time you rebuild, and you'll be granting Screen Recording until the heat death of the universe.
 
-```toml
-[vars]
-ELEVENLABS_VOICE_ID = "your-voice-id-here"
-```
+**4. Open Thambi** and grant Microphone, Accessibility (for the hotkey) and Screen Recording. Then hold Control + Option and ask away.
 
-Deploy it:
-
-```bash
-npx wrangler deploy
-```
-
-It'll give you a URL like `https://your-worker-name.your-subdomain.workers.dev`. Copy that.
-
-### 2. Run the Worker locally (for development)
-
-If you want to test changes to the Worker without deploying:
-
-```bash
-cd worker
-npx wrangler dev
-```
-
-This starts a local server (usually `http://localhost:8787`) that behaves exactly like the deployed Worker. You'll need to create a `.dev.vars` file in the `worker/` directory with your keys:
+## Where things live
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-ASSEMBLYAI_API_KEY=...
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=...
+leanring-buddy/                Swift source
+  CompanionManager.swift         the brain: hear → look → think → talk → point
+  ClaudeAPI.swift                talks to Claude (model allowlist, prompt caching)
+  ClickyModelRouter.swift        decides Haiku vs Sonnet
+  SystemSpeechTTSClient.swift    plays the voice and fires each arrow on time
+  SpeechAcronymSpeller.swift     the "E S P, not esp" department
+  OverlayWindow.swift            the cursor buddy and the arrows
+  ScreenBusynessMap.swift        finds empty space so arrows don't cover text
+  ThambiKeychain.swift           keys in the Keychain
+  VoiceServerLauncher.swift      starts/stops the voice with the app
+  ClickyShutdown.swift           the big red "go away now" button
+voice-server/                  the offline voice (Python)
 ```
 
-Then update the proxy URLs in the Swift code to point to `http://localhost:8787` instead of the deployed Worker URL while developing. Grep for `clicky-proxy` to find them all.
+## Credits
 
-### 3. Update the proxy URLs in the app
+Thambi grew out of an MIT-licensed open-source project. The original copyright notice lives in [LICENSE](LICENSE), as it should.
 
-The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
+## License
 
-```bash
-grep -r "clicky-proxy" leanring-buddy/
-```
-
-You'll find it in:
-- `CompanionManager.swift` — Claude chat + ElevenLabs TTS
-- `AssemblyAIStreamingTranscriptionProvider.swift` — AssemblyAI token endpoint
-
-### 4. Open in Xcode and run
-
-```bash
-open leanring-buddy.xcodeproj
-```
-
-In Xcode:
-1. Select the `leanring-buddy` scheme (yes, the typo is intentional, long story)
-2. Set your signing team under Signing & Capabilities
-3. Hit **Cmd + R** to build and run
-
-The app will appear in your menu bar (not the dock). Click the icon to open the panel, grant the permissions it asks for, and you're good.
-
-### Permissions the app needs
-
-- **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (Control + Option)
-- **Screen Recording** — for taking screenshots when you use the hotkey
-- **Screen Content** — for ScreenCaptureKit access
-
-## Architecture
-
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
-
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, sends the transcript + screenshot to Claude via streaming SSE, and plays the response through ElevenLabs TTS. Claude can embed `[POINT:x,y:label:screenN]` tags in its responses to make the cursor fly to specific UI elements across multiple monitors. All three APIs are proxied through a Cloudflare Worker.
-
-## Project structure
-
-```
-leanring-buddy/          # Swift source (yes, the typo stays)
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy
-  src/index.ts              # Three routes: /chat, /tts, /transcribe-token
-CLAUDE.md                # Full architecture doc (agents read this)
-```
-
-## Contributing
-
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
-
-Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
+MIT. Do cool stuff with it.
