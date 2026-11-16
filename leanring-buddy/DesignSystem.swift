@@ -2,7 +2,7 @@
 //  DesignSystem.swift
 //  leanring-buddy
 //
-//  Centralized design system using a blue accent palette on dark surfaces,
+//  Centralized design system: graphite surfaces, amber for what you do, cool blue for Thambi,
 //  with a unified button style system. All colors, button styles, and
 //  interaction states are defined here as the single source of truth.
 //
@@ -25,43 +25,44 @@ enum DS {
         // Higher surfaces are lighter, creating a sense of depth.
 
         /// The deepest background — used for the main app window fill.
-        static let background = Color(hex: "#101211")
+        static let background = Color(hex: "#0D1013")
 
         /// First elevation layer — used for cards, sidebar, top bar backgrounds.
-        static let surface1 = Color(hex: "#171918")
+        static let surface1 = Color(hex: "#15191C")
 
         /// Second elevation layer — used for input fields, elevated cards, chat bubbles.
-        static let surface2 = Color(hex: "#202221")
+        static let surface2 = Color(hex: "#1E2226")
 
         /// Third elevation layer — used for hover backgrounds on interactive elements.
-        static let surface3 = Color(hex: "#272A29")
+        static let surface3 = Color(hex: "#272C31")
 
         /// Fourth elevation layer — used for active/pressed states on interactive elements.
-        static let surface4 = Color(hex: "#2E3130")
+        static let surface4 = Color(hex: "#30363C")
 
         // ── Borders ──────────────────────────────────────────────────
 
         /// Subtle border — used for card outlines, dividers, input field borders.
-        static let borderSubtle = Color(hex: "#373B39")
+        static let borderSubtle = Color(hex: "#2D3135")
 
         /// Strong border — used for focused inputs, hovered card outlines.
-        static let borderStrong = Color(hex: "#444947")
+        static let borderStrong = Color(hex: "#484E54")
 
         // ── Text ─────────────────────────────────────────────────────
 
         /// Primary text — main body text, titles, headings.
-        static let textPrimary = Color(hex: "#ECEEED")
+        static let textPrimary = Color(hex: "#ECEFF2")
 
         /// Secondary text — descriptions, hints, muted labels.
-        static let textSecondary = Color(hex: "#ADB5B2")
+        static let textSecondary = Color(hex: "#B4B9BE")
 
         /// Tertiary text — very muted, used for section labels, timestamps, disabled text.
-        static let textTertiary = Color(hex: "#6B736F")
+        static let textTertiary = Color(hex: "#868B91")
 
-        /// Text used on top of the accent fill (#2563eb blue), like the primary button label.
-        /// White on #2563eb achieves ~5.1:1 contrast — WCAG AA compliant.
-        /// White on #1d4ed8 hover achieves ~6.5:1 — also WCAG AA compliant.
-        static let textOnAccent: Color = .white
+        /// Text on top of the amber accent fill, like the primary button label (about 10:1).
+        static let textOnAccent = Color(hex: "#1C0E00")
+
+        /// The deepest well: text inputs and the mascot's eyes.
+        static let well = Color(hex: "#06080B")
 
         // ── Tailwind Blue Scale ─────────────────────────────────────
         // Full Tailwind CSS v4 blue palette for consistent blue usage.
@@ -88,45 +89,56 @@ enum DS {
         static let blue900 = Color(hex: "#1e3a8a")
         static let blue950 = Color(hex: "#172554")
 
-        // ── Accent (derived from blue scale) ───────────────────────
-        // The primary fill is Blue 600; hover darkens to Blue 700.
+        // ── Accent: amber means "you" ───────────────────────────────
+        // Amber marks what the person does or must decide: the one primary
+        // button, the current choice, the step waiting for approval.
 
         /// Accent fill — used for solid button backgrounds.
-        /// #2563eb → ~5.1:1 contrast with white text (WCAG AA).
-        static let accent = blue600
+        static let accent = Color(hex: "#F7B83D")
 
-        /// Accent hover — slightly darker blue for hover state.
-        /// #1d4ed8 → ~6.5:1 contrast with white text (WCAG AA+).
-        static let accentHover = blue700
+        /// Accent hover — a little brighter.
+        static let accentHover = Color(hex: "#FFC75A")
 
-        /// Accent text — bright blue used for accent-colored text and icons
-        /// on dark backgrounds (links, active nav items, highlighted labels).
-        static let accentText = blue400
+        /// Accent-coloured text and icons on dark backgrounds.
+        static let accentText = Color(hex: "#F7B83D")
 
-        /// Very subtle accent tint — used for selected item backgrounds (e.g. current step
-        /// in the sidebar). Low opacity so it doesn't overpower.
-        static let accentSubtle = blue500.opacity(0.10)
+        /// Quiet amber tint behind the current choice.
+        static let accentSubtle = Color(hex: "#38280A")
+
+        // ── Cool: blue means "Thambi" ───────────────────────────────
+        // Cool blue marks Thambi itself: the mascot, and what it is doing or reading.
+
+        static let cool = Color(hex: "#6EBCFC")
+
+        /// Two extra hues used only inside drawings, where shapes need telling apart.
+        static let drawingTeal = Color(hex: "#4FC4B8")
+        static let drawingGrey = Color(hex: "#9DA2A8")
+        static let drawingWhite = Color(hex: "#D5DAE0")
+        static let coolDeep = Color(hex: "#328BD6")
+        static let coolSubtle = Color(hex: "#142E43")
 
         // ── Semantic Colors ──────────────────────────────────────────
 
         /// Destructive/error actions — delete buttons, error messages, close button hover.
-        static let destructive = Color(hex: "#E5484D")        // Radix Red 9
+        static let destructive = Color(hex: "#F66D67")
 
         /// Destructive hover state.
-        static let destructiveHover = Color(hex: "#F2555A")   // Radix Red 10
+        static let destructiveHover = Color(hex: "#FF8580")
 
         /// Destructive used for text on dark backgrounds (brighter for readability).
-        static let destructiveText = Color(hex: "#FF6369")    // Radix Red 11
+        static let destructiveText = Color(hex: "#F66D67")
 
         /// Success — checkmarks, granted status, completion indicators.
         /// Independent green so success states are visually distinct from the blue accent.
-        static let success = Color(hex: "#34D399")      // Tailwind Emerald 400
+        static let success = Color(hex: "#61CB7C")
+        static let successSubtle = Color(hex: "#162519")
+        static let destructiveSubtle = Color(hex: "#2F1A18")
 
         /// Warning — caution messages, manual verification failure explanations.
-        static let warning = Color(hex: "#FFB224")            // Radix Amber 9
+        static let warning = Color(hex: "#F7B83D")
 
         /// Warning text — brighter variant for text on dark backgrounds.
-        static let warningText = Color(hex: "#F1A10D")        // Radix Amber 11
+        static let warningText = Color(hex: "#F7B83D")
 
         /// Info/feature highlight — used for prompt card headers, code highlights.
         /// Lighter than accentText so informational elements are visually distinct
@@ -141,7 +153,7 @@ enum DS {
         /// The blue cursor/bubble color used in OverlayWindow.
         /// Kept distinct from the accent since it serves a different purpose
         /// (screen overlay vs in-app UI).
-        static let overlayCursorBlue = Color(hex: "#3380FF")
+        static let overlayCursorBlue = Color(hex: "#328BD6")
 
         // ── Floating Button Gradient ─────────────────────────────────
 

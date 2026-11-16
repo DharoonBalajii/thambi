@@ -3,7 +3,12 @@
 Local neural voice server for Clicky (Qwen3-TTS 0.6B via mlx-audio, runs on the Apple GPU).
 
   POST /speak   {"text": "one sentence or phrase"}  ->  audio/wav (mono, 24 kHz)
-  GET  /health  ->  {"ok": true, ...}
+  POST /warm    ->  loads the voice model in the background if it was unloaded
+  GET  /health  ->  {"ok": true, "loaded": true|false, ...}
+
+To keep the Mac cool and its memory free, the model is unloaded after `idle_unload_minutes`
+(config.json, default 10; 0 = never) without a request, and loaded again on the next one.
+Thambi calls /warm the moment you start a question, so it is usually ready before the answer.
 
 Privacy / safety:
   * Binds to 127.0.0.1 only, so nothing outside this Mac can reach it.
@@ -15,6 +20,7 @@ Privacy / safety:
 Voice, speed and style live in config.json next to this file and are re-read on every request,
 so you can change them without restarting.
 """
+import gc
 import io
 import json
 import os
@@ -42,10 +48,73 @@ DEFAULT_CONFIG = {
     "temperature": 0.7,       # lower = steadier, higher = more varied intonation
     "style": ("Speak like a warm, relaxed tutor chatting one-to-one. Natural conversational pace "
               "with small breaths and brief pauses between ideas, not a flat reading voice."),
+    "idle_unload_minutes": 10,  # free the model's memory after this long unused; 0 = keep it loaded
 }
 
 generation_lock = threading.Lock()  # the GPU model handles one request at a time
 model = None
+last_used = time.time()
+
+
+def ensure_model_loaded():
+    """Loads the model if it isn't in memory. Call with generation_lock held."""
+    global model
+    if model is not None:
+        return
+    started = time.time()
+    model = load_model(MODEL_ID)
+    print(f"[tts] model loaded in {time.time() - started:.1f}s", flush=True)
+
+
+def warm_in_background():
+    """Loads the model ahead of the first sentence (no-op when it is already loaded or loading)."""
+    def warm():
+        global last_used
+        try:
+            with generation_lock:
+                last_used = time.time()
+                ensure_model_loaded()
+        except Exception as error:
+            print(f"[tts] warm failed: {error}", flush=True)
+    threading.Thread(target=warm, daemon=True).start()
+
+
+def unload_model_if_idle():
+    """Drops the model once it has gone unused for idle_unload_minutes. Returns True if it unloaded."""
+    global model
+    try:
+        idle_minutes = float(load_config().get("idle_unload_minutes", 10))
+    except (TypeError, ValueError):
+        idle_minutes = 10.0
+    if idle_minutes <= 0 or model is None:
+        return False
+    if not generation_lock.acquire(blocking=False):  # busy speaking: not idle
+        return False
+    try:
+        if model is None or time.time() - last_used < idle_minutes * 60:
+            return False
+        model = None
+        gc.collect()
+        try:
+            import mlx.core as mx
+            (getattr(mx, "clear_cache", None) or mx.metal.clear_cache)()
+        except Exception:
+            pass
+        print(f"[tts] idle for {idle_minutes:g} min; model unloaded to free memory", flush=True)
+        return True
+    finally:
+        generation_lock.release()
+
+
+def unload_when_idle_forever():
+    def watch():
+        while True:
+            time.sleep(30)
+            try:
+                unload_model_if_idle()
+            except Exception as error:
+                print(f"[tts] idle check failed: {error}", flush=True)
+    threading.Thread(target=watch, daemon=True).start()
 
 
 def load_config():
@@ -128,7 +197,10 @@ def level_audio(audio, target_rms=0.09, max_gain=4.0):
 def synthesize(text):
     config = load_config()
     segments, sample_rate = [], 24000
+    global last_used
     with generation_lock:
+        last_used = time.time()
+        ensure_model_loaded()
         for result in model.generate(
             text,
             voice=config["voice"],
@@ -139,6 +211,7 @@ def synthesize(text):
         ):
             segments.append(np.array(result.audio, dtype=np.float32).reshape(-1))
             sample_rate = getattr(result, "sample_rate", sample_rate) or sample_rate
+        last_used = time.time()
     audio = np.concatenate(segments) if segments else np.zeros(1, dtype=np.float32)
     audio = level_audio(speed_up(trim_silence(audio, sample_rate), sample_rate, float(config["speed"])))
     buffer = io.BytesIO()
@@ -166,13 +239,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._send(200, json.dumps({"ok": True, "model": MODEL_ID, "voice": load_config()["voice"]}).encode())
+            self._send(200, json.dumps({
+                "ok": True, "model": MODEL_ID, "voice": load_config()["voice"], "loaded": model is not None,
+            }).encode())
         else:
             self._send(404, b'{"error":"not found"}')
 
     def do_POST(self):
         if self._forbidden():
             return self._send(403, b'{"error":"forbidden"}')
+        if self.path == "/warm":
+            warm_in_background()
+            return self._send(200, b'{"ok":true}')
         if self.path != "/speak":
             return self._send(404, b'{"error":"not found"}')
         try:
@@ -204,17 +282,18 @@ def exit_when_parent_app_quits(parent_pid):
 
 
 def main():
-    global model
     if "--parent-pid" in sys.argv:
         exit_when_parent_app_quits(int(sys.argv[sys.argv.index("--parent-pid") + 1]))
     print(f"[tts] loading {MODEL_ID} ...", flush=True)
     started = time.time()
-    model = load_model(MODEL_ID)
+    with generation_lock:
+        ensure_model_loaded()
     print(f"[tts] loaded in {time.time() - started:.1f}s; warming up the GPU ...", flush=True)
     started = time.time()
     synthesize("hello there, this is a quick warm up.")  # first run compiles GPU kernels (slow); do it now
     print(f"[tts] warm-up done in {time.time() - started:.1f}s. Voice: {load_config()['voice']}. "
           f"Listening on http://{HOST}:{PORT}", flush=True)
+    unload_when_idle_forever()
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

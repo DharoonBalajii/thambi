@@ -298,6 +298,18 @@ struct BlueCursorView: View {
                     }
             }
 
+            // Boxes, underlines and circles Thambi draws around parts of this screen as it explains them.
+            ScreenMarksLayer(marks: companionManager.screenMarks.filter { $0.displayFrame == screenFrame }.map { mark in
+                ScreenMarksLayer.Placed(
+                    id: mark.id, kind: mark.kind, label: mark.label,
+                    rect: CGRect(
+                        x: mark.globalRect.minX - screenFrame.minX, y: screenFrame.maxY - mark.globalRect.maxY,
+                        width: mark.globalRect.width, height: mark.globalRect.height
+                    )
+                )
+            })
+            .allowsHitTesting(false)
+
             // Drawn arrow from the buddy to just short of the exact spot being pointed at.
             if let highlightedTargetInSwiftUI {
                 TargetHighlightView(target: highlightedTargetInSwiftUI, buddyRestingPosition: highlightedBuddyRestingPosition)
@@ -313,13 +325,19 @@ struct BlueCursorView: View {
             // During cursor following: fast spring animation for snappy tracking.
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
-            Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: 16, height: 16)
-                .rotationEffect(.degrees(triangleRotationDegrees))
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
+            // Thambi's face is the buddy: it blinks while waiting, opens its eyes wide while you
+            // talk, glances about while thinking, and its mouth moves while it explains.
+            // It leans a little into the direction it is flying, and stays upright otherwise.
+            ThambiMascot(
+                mood: buddyMascotMood,
+                size: 22,
+                audioLevel: companionManager.currentAudioPowerLevel,
+                isActive: buddyIsVisibleOnThisScreen
+            )
+                .rotationEffect(.degrees(buddyNavigationMode == .navigatingToTarget ? buddyFlightLeanDegrees : 0))
+                .shadow(color: DS.Colors.well.opacity(0.45), radius: 3, x: 0, y: 1)
                 .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
+                .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(
                     buddyNavigationMode == .followingCursor
@@ -333,17 +351,14 @@ struct BlueCursorView: View {
                     value: triangleRotationDegrees
                 )
 
-            // Blue waveform — replaces the triangle while listening
-            BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
+            // A small waveform beside the face while you talk, so you can see it hears you.
+            BlueCursorWaveformView(
+                audioPowerLevel: companionManager.currentAudioPowerLevel,
+                isAnimating: companionManager.voiceState == .listening
+            )
+                .scaleEffect(0.7)
                 .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .listening ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
-
-            // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
-            BlueCursorSpinnerView()
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing ? cursorOpacity : 0)
-                .position(cursorPosition)
+                .position(x: cursorPosition.x + 24, y: cursorPosition.y)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
@@ -398,6 +413,30 @@ struct BlueCursorView: View {
         }
     }
 
+    /// What the buddy's face is doing right now.
+    private var buddyMascotMood: ThambiMascot.Mood {
+        if companionManager.isControlTaskRunning {
+            switch companionManager.computerControlAgent.phase {
+            case .waitingForApproval: return .asking
+            case .looking: return .thinking
+            default: return .acting
+            }
+        }
+        if companionManager.isTypingByVoice { return .listening }
+        switch companionManager.voiceState {
+        case .idle: return .idle
+        case .listening: return .listening
+        case .processing: return .thinking
+        case .responding: return .speaking
+        }
+    }
+
+    /// A gentle lean into the direction of flight (at most 14 degrees), never a full spin.
+    private var buddyFlightLeanDegrees: Double {
+        let heading = (triangleRotationDegrees - 90) * .pi / 180
+        return max(-14, min(14, cos(heading) * 14))
+    }
+
     /// Whether the buddy triangle should be visible on this screen.
     /// True when cursor is on this screen during normal following, or
     /// when navigating/pointing at a target on this screen. When another
@@ -423,7 +462,12 @@ struct BlueCursorView: View {
     private func startTrackingCursor() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
             let mouseLocation = NSEvent.mouseLocation
-            self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+            // Only touch SwiftUI state when something changed: writing the same value 60 times a
+            // second redraws the overlay for nothing and keeps the CPU busy while the mouse is still.
+            let isMouseOnThisScreen = self.screenFrame.contains(mouseLocation)
+            if self.isCursorOnThisScreen != isMouseOnThisScreen {
+                self.isCursorOnThisScreen = isMouseOnThisScreen
+            }
 
             // LOCAL: pointing is never disturbed by mouse movement. The flight out, the arrow, the
             // wait between spoken targets and the flight back all run to completion no matter what the
@@ -441,8 +485,13 @@ struct BlueCursorView: View {
             let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
             let buddyX = swiftUIPosition.x + 35
             let buddyY = swiftUIPosition.y + 25
-            self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
+            let newCursorPosition = CGPoint(x: buddyX, y: buddyY)
+            if self.cursorPosition != newCursorPosition {
+                self.cursorPosition = newCursorPosition
+            }
         }
+        // Let macOS batch the wake-ups a little; invisible at 60 fps, kinder to the battery.
+        timer?.tolerance = 0.004
     }
 
     /// Converts a macOS screen point (AppKit, bottom-left origin) to SwiftUI
@@ -766,12 +815,15 @@ struct BlueCursorView: View {
 /// the user is holding the push-to-talk shortcut and speaking.
 private struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
+    /// The view stays in the tree (hidden) when not listening; it must not redraw then, or the
+    /// app burns CPU all day for an invisible animation.
+    let isAnimating: Bool
 
     private let barCount = 5
     private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 36.0)) { timelineContext in
+        TimelineView(.animation(minimumInterval: 1.0 / 36.0, paused: !isAnimating)) { timelineContext in
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<barCount, id: \.self) { barIndex in
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
@@ -805,29 +857,30 @@ private struct BlueCursorWaveformView: View {
 /// A small blue spinning indicator that replaces the triangle cursor
 /// while the AI is processing a voice input.
 private struct BlueCursorSpinnerView: View {
-    @State private var isSpinning = false
+    /// Only spins while it is showing; hidden, it costs nothing.
+    let isAnimating: Bool
+
+    private static let secondsPerTurn = 0.8
 
     var body: some View {
-        Circle()
-            .trim(from: 0.15, to: 0.85)
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
-                    ],
-                    center: .center
-                ),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-            )
-            .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
-                }
-            }
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isAnimating)) { timelineContext in
+            let turns = timelineContext.date.timeIntervalSinceReferenceDate / Self.secondsPerTurn
+            Circle()
+                .trim(from: 0.15, to: 0.85)
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            DS.Colors.overlayCursorBlue.opacity(0.0),
+                            DS.Colors.overlayCursorBlue
+                        ],
+                        center: .center
+                    ),
+                    style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+                )
+                .frame(width: 14, height: 14)
+                .rotationEffect(.degrees(turns.truncatingRemainder(dividingBy: 1) * 360))
+                .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+        }
     }
 }
 
@@ -1003,5 +1056,105 @@ private struct HighlightArrowHeadShape: Shape {
         headPath.addLine(to: head)
         headPath.addLine(to: rightBarbPoint)
         return headPath
+    }
+}
+
+
+// MARK: - Marks drawn over the screen
+
+/// One box, underline or circle Thambi drew on a screen, in global AppKit coordinates.
+struct ScreenMark: Identifiable, Equatable {
+    let id = UUID()
+    let kind: SpeechTimedTags.MarkKind
+    let globalRect: CGRect
+    let displayFrame: CGRect
+    let label: String
+
+    static func == (left: ScreenMark, right: ScreenMark) -> Bool { left.id == right.id }
+}
+
+/// Draws marks in a view's own coordinates (top-left origin). Each one draws itself on in a
+/// third of a second, or simply appears when Reduce Motion is on.
+struct ScreenMarksLayer: View {
+    struct Placed: Identifiable {
+        let id: UUID
+        let kind: SpeechTimedTags.MarkKind
+        let label: String
+        let rect: CGRect
+    }
+
+    let marks: [Placed]
+    var drawsOn = true
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(marks) { mark in
+                ScreenMarkView(mark: mark, drawsOn: drawsOn)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct ScreenMarkShape: Shape {
+    let kind: SpeechTimedTags.MarkKind
+
+    func path(in rect: CGRect) -> Path {
+        switch kind {
+        case .box: return Path(roundedRect: rect, cornerRadius: 6, style: .continuous)
+        case .circle: return Path(ellipseIn: rect)
+        case .underline:
+            var path = Path()
+            path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            return path
+        }
+    }
+}
+
+private struct ScreenMarkView: View {
+    let mark: ScreenMarksLayer.Placed
+    let drawsOn: Bool
+
+    @State private var progress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        // A little air around the thing being marked, so the line does not sit on its edge.
+        let padding: CGFloat = mark.kind == .underline ? 0 : 5
+        let rect = mark.rect.insetBy(dx: -padding, dy: mark.kind == .underline ? -2 : -padding)
+        let shown = (drawsOn && !reduceMotion) ? progress : 1
+
+        ZStack(alignment: .topLeading) {
+            // A dark line underneath keeps the mark visible on light and dark pages alike.
+            ScreenMarkShape(kind: mark.kind)
+                .trim(from: 0, to: shown)
+                .stroke(DS.Colors.well.opacity(0.55), style: StrokeStyle(lineWidth: 5.5, lineCap: .round, lineJoin: .round))
+            ScreenMarkShape(kind: mark.kind)
+                .trim(from: 0, to: shown)
+                .stroke(DS.Colors.cool, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+        }
+        .frame(width: max(rect.width, 1), height: max(rect.height, 1))
+        .overlay(alignment: .topLeading) {
+            if !mark.label.isEmpty {
+                Text(mark.label)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(DS.Colors.well)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(DS.Colors.cool))
+                    .fixedSize()
+                    // Above the mark, or below it when the mark is at the top of the screen.
+                    .offset(x: 0, y: rect.minY > 30 ? -26 : max(rect.height, 1) + 6)
+                    .opacity(Double(shown))
+            }
+        }
+        .offset(x: rect.minX, y: rect.minY)
+        .accessibilityElement()
+        .accessibilityLabel(mark.label.isEmpty ? "Marked area" : "Marked: \(mark.label)")
+        .onAppear {
+            guard drawsOn, !reduceMotion else { return }
+            withAnimation(.easeOut(duration: 0.35)) { progress = 1 }
+        }
     }
 }

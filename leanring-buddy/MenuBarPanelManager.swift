@@ -16,6 +16,8 @@ import SwiftUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
+    /// Opens the panel so a question can be typed (Control + Option + T).
+    static let thambiShowTypeQuestion = Notification.Name("thambiShowTypeQuestion")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -30,6 +32,8 @@ final class MenuBarPanelManager: NSObject {
     private var panel: NSPanel?
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
+    private var showTypeQuestionObserver: NSObjectProtocol?
+    private var contentHeightObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -47,6 +51,24 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             self?.hidePanel()
         }
+
+        contentHeightObserver = NotificationCenter.default.addObserver(
+            forName: .thambiPanelContentHeightChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // A section opened or closed: keep the panel's top edge under the menu bar.
+            guard let self, self.panel?.isVisible == true else { return }
+            self.positionPanelBelowStatusItem()
+        }
+
+        showTypeQuestionObserver = NotificationCenter.default.addObserver(
+            forName: .thambiShowTypeQuestion,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.showPanel()
+        }
     }
 
     deinit {
@@ -54,6 +76,9 @@ final class MenuBarPanelManager: NSObject {
             NSEvent.removeMonitor(monitor)
         }
         if let observer = dismissPanelObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = showTypeQuestionObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -65,46 +90,10 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClickyMenuBarIcon()
+        button.image = ThambiMascotArt.menuBarIcon()
         button.image?.isTemplate = true
         button.action = #selector(statusItemClicked)
         button.target = self
-    }
-
-    /// Draws the clicky triangle as a menu bar icon. Uses the same shape
-    /// and rotation as the in-app cursor so the menu bar icon matches.
-    private func makeClickyMenuBarIcon() -> NSImage {
-        let iconSize: CGFloat = 18
-        let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
-        image.lockFocus()
-
-        let triangleSize = iconSize * 0.7
-        let cx = iconSize * 0.50
-        let cy = iconSize * 0.50
-        let height = triangleSize * sqrt(3.0) / 2.0
-
-        let top = CGPoint(x: cx, y: cy + height / 1.5)
-        let bottomLeft = CGPoint(x: cx - triangleSize / 2, y: cy - height / 3)
-        let bottomRight = CGPoint(x: cx + triangleSize / 2, y: cy - height / 3)
-
-        let angle = 35.0 * .pi / 180.0
-        func rotate(_ point: CGPoint) -> CGPoint {
-            let dx = point.x - cx, dy = point.y - cy
-            let cosA = CGFloat(cos(angle)), sinA = CGFloat(sin(angle))
-            return CGPoint(x: cx + cosA * dx - sinA * dy, y: cy + sinA * dx + cosA * dy)
-        }
-
-        let path = NSBezierPath()
-        path.move(to: rotate(top))
-        path.line(to: rotate(bottomLeft))
-        path.line(to: rotate(bottomRight))
-        path.close()
-
-        NSColor.black.setFill()
-        path.fill()
-
-        image.unlockFocus()
-        return image
     }
 
     /// Opens the panel automatically on app launch so the user sees
@@ -130,6 +119,8 @@ final class MenuBarPanelManager: NSObject {
         if panel == nil {
             createPanel()
         }
+        // The memory file may have been edited by hand since the panel was last open.
+        companionManager.refreshMemoryEntryCount()
 
         positionPanelBelowStatusItem()
 

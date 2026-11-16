@@ -27,7 +27,9 @@ enum CompanionScreenCaptureUtility {
     /// Captures all connected displays as JPEG data, labeling each with
     /// whether the user's cursor is on that screen. This gives the AI
     /// full context across multiple monitors.
-    static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
+    /// `maxDimension` is the longer side in pixels. The AI bills an image by its area, so a
+    /// smaller picture is cheaper; see ThambiSettings for the sizes used and why.
+    static func captureAllScreensAsJPEG(maxDimension: Int = ThambiSettings.questionScreenshotMaxDimension) async throws -> [CompanionScreenCapture] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard !content.displays.isEmpty else {
@@ -81,7 +83,6 @@ enum CompanionScreenCaptureUtility {
             let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
 
             let configuration = SCStreamConfiguration()
-            let maxDimension = 1280
             let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
             if display.width >= display.height {
                 configuration.width = maxDimension

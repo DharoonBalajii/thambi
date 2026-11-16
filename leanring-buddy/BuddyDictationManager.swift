@@ -14,12 +14,33 @@ import Foundation
 import Speech
 
 enum BuddyPushToTalkShortcut {
-    enum ShortcutOption {
+    enum ShortcutOption: String, CaseIterable, Identifiable {
         case shiftFunction
         case controlOption
         case shiftControl
         case controlOptionSpace
         case shiftControlSpace
+
+        var id: String { rawValue }
+
+        /// How the shortcut is written in the panel: "Control + Option".
+        var menuTitle: String {
+            switch self {
+            case .shiftFunction:
+                return "Shift + Fn"
+            case .controlOption:
+                return "Control + Option"
+            case .shiftControl:
+                return "Shift + Control"
+            case .controlOptionSpace:
+                return "Control + Option + Space"
+            case .shiftControlSpace:
+                return "Shift + Control + Space"
+            }
+        }
+
+        /// The order shown in the panel's shortcut menu (the default first).
+        static let menuOrder: [ShortcutOption] = [.controlOption, .shiftControl, .shiftFunction, .controlOptionSpace, .shiftControlSpace]
 
         var displayText: String {
             switch self {
@@ -92,10 +113,88 @@ enum BuddyPushToTalkShortcut {
         case keyUp
     }
 
-    static let currentShortcutOption: ShortcutOption = .controlOption
+    static let defaultShortcutOption: ShortcutOption = .controlOption
+    private static let shortcutOptionDefaultsKey = "pushToTalkShortcutOption"
+
+    /// The saved shortcut for a stored value; anything unknown falls back to Control + Option.
+    static func shortcutOption(forStoredValue storedValue: String?) -> ShortcutOption {
+        storedValue.flatMap(ShortcutOption.init(rawValue:)) ?? defaultShortcutOption
+    }
+
+    /// The push-to-talk shortcut, chosen in the panel and remembered on this Mac.
+    static var currentShortcutOption: ShortcutOption = shortcutOption(
+        forStoredValue: UserDefaults.standard.string(forKey: shortcutOptionDefaultsKey)
+    ) {
+        didSet { UserDefaults.standard.set(currentShortcutOption.rawValue, forKey: shortcutOptionDefaultsKey) }
+    }
     static let pushToTalkKeyCode: UInt16 = 49 // Space
-    static let pushToTalkDisplayText = currentShortcutOption.displayText
-    static let pushToTalkTooltipText = "push to talk (\(pushToTalkDisplayText))"
+    static var pushToTalkDisplayText: String { currentShortcutOption.displayText }
+    static var pushToTalkTooltipText: String { "push to talk (\(pushToTalkDisplayText))" }
+
+    // MARK: - Type anywhere by voice
+
+    /// The keys you hold to dictate into the app in front. Always includes Command, which the
+    /// ask shortcut never does, so the two can't be confused.
+    enum DictationShortcutOption: String, CaseIterable, Identifiable {
+        case optionCommand
+        case controlCommand
+        case shiftCommandOption
+        case off
+
+        var id: String { rawValue }
+
+        var menuTitle: String {
+            switch self {
+            case .optionCommand: return "Option + Command"
+            case .controlCommand: return "Control + Command"
+            case .shiftCommandOption: return "Shift + Option + Command"
+            case .off: return "Off"
+            }
+        }
+
+        var modifierFlags: NSEvent.ModifierFlags? {
+            switch self {
+            case .optionCommand: return [.option, .command]
+            case .controlCommand: return [.control, .command]
+            case .shiftCommandOption: return [.shift, .option, .command]
+            case .off: return nil
+            }
+        }
+    }
+
+    private static let dictationShortcutDefaultsKey = "dictationShortcutOption"
+
+    static func dictationShortcutOption(forStoredValue storedValue: String?) -> DictationShortcutOption {
+        storedValue.flatMap(DictationShortcutOption.init(rawValue:)) ?? .optionCommand
+    }
+
+    static var currentDictationShortcutOption: DictationShortcutOption = dictationShortcutOption(
+        forStoredValue: UserDefaults.standard.string(forKey: dictationShortcutDefaultsKey)
+    ) {
+        didSet { UserDefaults.standard.set(currentDictationShortcutOption.rawValue, forKey: dictationShortcutDefaultsKey) }
+    }
+
+    /// True only when exactly the dictation keys are down: holding one more modifier means some other shortcut.
+    static func isDictationShortcutHeld(modifierFlagsRawValue: UInt64, option: DictationShortcutOption = currentDictationShortcutOption) -> Bool {
+        guard let wantedFlags = option.modifierFlags else { return false }
+        let heldFlags = NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue))
+            .intersection([.control, .option, .shift, .command, .function])
+        return heldFlags == wantedFlags
+    }
+
+    // MARK: - Other global keys
+
+    static let escapeKeyCode: UInt16 = 53
+    static let typeQuestionKeyCode: UInt16 = 17 // T
+    static let typeQuestionShortcutDisplayText = "Control + Option + T"
+
+    /// Control + Option + T opens the box for typing a question.
+    static func isTypeQuestionShortcut(keyCode: UInt16, modifierFlagsRawValue: UInt64) -> Bool {
+        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue)).intersection(.deviceIndependentFlagsMask)
+        return keyCode == typeQuestionKeyCode
+            && modifierFlags.isSuperset(of: [.control, .option])
+            && !modifierFlags.contains(.command)
+    }
 
     static func shortcutTransition(
         for event: NSEvent,
@@ -225,16 +324,27 @@ final class MicrophoneAudioHandoff: @unchecked Sendable {
     /// ~20s of audio at 1024-frame buffers; a safety cap so a stuck connection can't grow memory forever.
     private let maximumBufferedAudioBuffers = 1_000
 
+    private var receivedBuffers = 0
+
+    /// How many microphone buffers have arrived since the last reset (0 means the microphone is silent or stuck).
+    var receivedBufferCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedBuffers
+    }
+
     func reset() {
         lock.lock()
         bufferedAudio.removeAll()
         readySession = nil
+        receivedBuffers = 0
         lock.unlock()
     }
 
     /// Called on the audio thread for every microphone buffer.
     func handle(_ audioBuffer: AVAudioPCMBuffer) {
         lock.lock()
+        receivedBuffers += 1
         if let readySession {
             lock.unlock()
             readySession.appendAudioBuffer(audioBuffer)
@@ -324,7 +434,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     var needsInitialPermissionPrompt: Bool {
-        if transcriptionProvider.requiresSpeechRecognitionPermission {
+        if activeTranscriptionProvider.requiresSpeechRecognitionPermission {
             return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
                 || SFSpeechRecognizer.authorizationStatus() == .notDetermined
         }
@@ -332,8 +442,26 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
     }
 
-    private let transcriptionProvider: any BuddyTranscriptionProvider
+    private var transcriptionProvider: any BuddyTranscriptionProvider
+
+    /// Picks the recogniser again after the "speech for questions" setting changed.
+    func reloadTranscriptionProvider() {
+        guard !isDictationInProgress else { return }
+        transcriptionProvider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
+        transcriptionProviderDisplayName = transcriptionProvider.displayName
+    }
+    /// Set for one recording when it must use a different recogniser (typing by voice is always on-device).
+    private var transcriptionProviderForCurrentSession: (any BuddyTranscriptionProvider)?
+    private var activeTranscriptionProvider: any BuddyTranscriptionProvider {
+        transcriptionProviderForCurrentSession ?? transcriptionProvider
+    }
     private let audioEngine = AVAudioEngine()
+    /// Mic failover: true once this recording has already been moved to the Mac's own microphone.
+    private var hasFailedOverToBuiltInMicrophone = false
+    private var microphoneWatchdogWorkItem: DispatchWorkItem?
+    private var audioEngineConfigurationObserver: NSObjectProtocol?
+    /// Shown in the panel after a failover ("Using the Mac's microphone").
+    @Published private(set) var microphoneNotice: String?
     private let microphoneAudioHandoff = MicrophoneAudioHandoff()
     private var captureStartedAt: Date?
     private var captureStoppedAt: Date?
@@ -361,6 +489,18 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         self.transcriptionProvider = transcriptionProvider
         self.transcriptionProviderDisplayName = transcriptionProvider.displayName
         super.init()
+        // Headphones connected or removed mid-sentence: carry on with the microphone that is there now.
+        audioEngineConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: audioEngine, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleAudioDeviceChange() }
+        }
+    }
+
+    deinit {
+        if let audioEngineConfigurationObserver {
+            NotificationCenter.default.removeObserver(audioEngineConfigurationObserver)
+        }
     }
 
     func updateContextualKeyterms(_ contextualKeyterms: [String]) {
@@ -383,9 +523,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     func startPushToTalkFromKeyboardShortcut(
         currentDraftText: String,
+        transcriptionProviderOverride: (any BuddyTranscriptionProvider)? = nil,
         updateDraftText: @escaping (String) -> Void,
         submitDraftText: @escaping (String) -> Void
     ) async {
+        guard !isDictationInProgress else { return }
+        transcriptionProviderForCurrentSession = transcriptionProviderOverride
         await startPushToTalk(
             startSource: .keyboardShortcut,
             currentDraftText: currentDraftText,
@@ -549,7 +692,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 from: error,
                 fallback: "couldn't start voice input. try again."
             )
-            print("❌ BuddyDictationManager: failed to start recognition session (\(transcriptionProvider.displayName)): \(error)")
+            print("❌ BuddyDictationManager: failed to start recognition session (\(activeTranscriptionProvider.displayName)): \(error)")
             resetSessionState()
         }
     }
@@ -604,23 +747,25 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let microphoneAudioHandoff = self.microphoneAudioHandoff
         microphoneAudioHandoff.reset()
 
-        let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            microphoneAudioHandoff.handle(buffer)
-            self?.updateAudioPowerLevel(from: buffer)
+        hasFailedOverToBuiltInMicrophone = false
+        microphoneNotice = nil
+        do {
+            try startMicrophoneCapture(avoidingSystemDefault: false)
+        } catch {
+            // The chosen microphone would not start (common just after Bluetooth headphones connect).
+            guard MicrophoneRouter.hasFallbackMicrophone else { throw error }
+            print("🎙️ BuddyDictationManager: microphone failed to start (\(error.localizedDescription)); trying the Mac's own microphone")
+            try startMicrophoneCapture(avoidingSystemDefault: true)
+            hasFailedOverToBuiltInMicrophone = true
+            microphoneNotice = "Using the Mac's microphone"
         }
-
-        audioEngine.prepare()
-        try audioEngine.start()
         captureStartedAt = Date()
         captureStoppedAt = nil
+        scheduleMicrophoneWatchdog()
 
-        print("🎙️ BuddyDictationManager: microphone capturing; opening transcription provider \(transcriptionProvider.displayName)")
+        print("🎙️ BuddyDictationManager: opening transcription provider \(activeTranscriptionProvider.displayName)")
 
-        let transcriptionProvider = self.transcriptionProvider
+        let transcriptionProvider = self.activeTranscriptionProvider
         let transcriptionKeyterms = buildTranscriptionKeyterms()
 
         // Unstructured Task on purpose: releasing the shortcut cancels the calling task, and that
@@ -678,6 +823,75 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Microphone capture and failover
+
+    private struct MicrophoneUnavailableError: LocalizedError {
+        var errorDescription: String? { "no working microphone was found. check System Settings > Sound > Input." }
+    }
+
+    /// Starts the microphone. Throws if the device gives no usable audio format or will not start.
+    private func startMicrophoneCapture(avoidingSystemDefault: Bool) throws {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        let microphoneDescription = MicrophoneRouter.route(audioEngine, avoidingSystemDefault: avoidingSystemDefault)
+
+        let inputNode = audioEngine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        // A Bluetooth headset that is still switching modes reports an empty format.
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else { throw MicrophoneUnavailableError() }
+
+        let microphoneAudioHandoff = self.microphoneAudioHandoff
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+            microphoneAudioHandoff.handle(buffer)
+            self?.updateAudioPowerLevel(from: buffer)
+        }
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            throw error
+        }
+        print("🎙️ BuddyDictationManager: listening with \(microphoneDescription) (\(Int(inputFormat.sampleRate)) Hz)")
+    }
+
+    /// If the microphone has delivered no sound at all shortly after starting, it is stuck
+    /// (a Bluetooth headset that never switched on): move to the Mac's own microphone.
+    private func scheduleMicrophoneWatchdog() {
+        microphoneWatchdogWorkItem?.cancel()
+        let watchdogWorkItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isActivelyRecordingAudio, !self.hasFailedOverToBuiltInMicrophone else { return }
+                guard self.microphoneAudioHandoff.receivedBufferCount == 0, MicrophoneRouter.hasFallbackMicrophone else { return }
+                print("🎙️ BuddyDictationManager: no audio from the microphone; switching to the Mac's own microphone")
+                self.hasFailedOverToBuiltInMicrophone = true
+                if (try? self.startMicrophoneCapture(avoidingSystemDefault: true)) != nil {
+                    self.microphoneNotice = "Using the Mac's microphone"
+                }
+            }
+        }
+        microphoneWatchdogWorkItem = watchdogWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: watchdogWorkItem)
+    }
+
+    /// The audio hardware changed while recording (headphones connected, removed, or switched mode).
+    /// The engine has stopped itself; start it again on whatever microphone is right now.
+    private func handleAudioDeviceChange() {
+        guard isActivelyRecordingAudio, !audioEngine.isRunning else { return }
+        print("🎙️ BuddyDictationManager: audio device changed while recording; restarting the microphone")
+        do {
+            try startMicrophoneCapture(avoidingSystemDefault: hasFailedOverToBuiltInMicrophone)
+        } catch {
+            guard MicrophoneRouter.hasFallbackMicrophone, !hasFailedOverToBuiltInMicrophone,
+                  (try? startMicrophoneCapture(avoidingSystemDefault: true)) != nil else {
+                handleRecognitionError(error)
+                return
+            }
+            hasFailedOverToBuiltInMicrophone = true
+            microphoneNotice = "Using the Mac's microphone"
+        }
+    }
+
     private func handleRecognitionError(_ error: Error) {
         if hasFinishedCurrentDictationSession {
             return
@@ -688,7 +902,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft
             )
         } else {
-            print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
+            print("❌ Buddy dictation error (\(activeTranscriptionProvider.displayName)): \(error)")
             lastErrorMessage = userFacingErrorMessage(
                 from: error,
                 fallback: "couldn't transcribe that. try again."
@@ -747,6 +961,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private func resetSessionState() {
         pendingStartRequestIdentifier = UUID()
+        microphoneWatchdogWorkItem?.cancel()
+        microphoneWatchdogWorkItem = nil
+        transcriptionProviderForCurrentSession = nil
         microphoneAudioHandoff.reset()
         captureStartedAt = nil
         captureStoppedAt = nil
@@ -772,20 +989,11 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private func buildTranscriptionKeyterms() -> [String] {
-        let baseKeyterms = [
-            "Learning Buddy",
-            "Codex",
-            "Claude",
-            "Anthropic",
-            "OpenAI",
-            "SwiftUI",
-            "Xcode",
-            "Vercel",
-            "Next.js",
-            "localhost"
-        ]
+        // The learned dictionary (course terms and names) comes first: it is what this user actually says.
+        let dictionaryKeyterms = ThambiDictionary.keyterms(in: ThambiDictionary.load())
+        let baseKeyterms = ["Thambi", "Claude", "SwiftUI", "Xcode", "localhost"]
 
-        let combinedKeyterms = baseKeyterms + contextualKeyterms
+        let combinedKeyterms = dictionaryKeyterms + baseKeyterms + contextualKeyterms
         var uniqueNormalizedKeyterms = Set<String>()
         var orderedKeyterms: [String] = []
 
@@ -861,7 +1069,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return false
         }
 
-        guard transcriptionProvider.requiresSpeechRecognitionPermission else {
+        guard activeTranscriptionProvider.requiresSpeechRecognitionPermission else {
             return true
         }
 

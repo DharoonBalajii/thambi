@@ -14,6 +14,16 @@ import Foundation
 
 final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+    /// Escape was pressed anywhere (used to stop the voice). The key still reaches the app in front.
+    let escapeKeyPublisher = PassthroughSubject<Void, Never>()
+    /// Control + Option + T was pressed (opens the box for typing a question).
+    let typeQuestionShortcutPublisher = PassthroughSubject<Void, Never>()
+
+    /// Type anywhere by voice: pressed and released like push-to-talk. `.none` is sent when another
+    /// key is pressed while the keys are held, meaning it was an ordinary shortcut (Command + Option + V)
+    /// and the dictation must be dropped.
+    let dictationShortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+    private var isDictationShortcutCurrentlyPressed = false
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -83,6 +93,12 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         CGEvent.tapEnable(tap: globalEventTap, enable: true)
     }
 
+    /// Call after the push-to-talk shortcut is changed, so a half-held old shortcut isn't left "pressed".
+    func resetPressedState() {
+        isShortcutCurrentlyPressed = false
+        isDictationShortcutCurrentlyPressed = false
+    }
+
     func stop() {
         isShortcutCurrentlyPressed = false
 
@@ -108,7 +124,37 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             return Unmanaged.passUnretained(event)
         }
 
+        // Thambi's own typing (dictation, computer control) is never treated as the user's keys.
+        if event.getIntegerValueField(.eventSourceUserData) == DictationTextInserter.syntheticEventMarker {
+            return Unmanaged.passUnretained(event)
+        }
+
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        if eventType == .flagsChanged {
+            let isDictationShortcutHeld = BuddyPushToTalkShortcut.isDictationShortcutHeld(modifierFlagsRawValue: event.flags.rawValue)
+            if isDictationShortcutHeld && !isDictationShortcutCurrentlyPressed {
+                isDictationShortcutCurrentlyPressed = true
+                dictationShortcutTransitionPublisher.send(.pressed)
+            } else if !isDictationShortcutHeld && isDictationShortcutCurrentlyPressed {
+                isDictationShortcutCurrentlyPressed = false
+                dictationShortcutTransitionPublisher.send(.released)
+            }
+        } else if eventType == .keyDown {
+            if isDictationShortcutCurrentlyPressed {
+                isDictationShortcutCurrentlyPressed = false
+                dictationShortcutTransitionPublisher.send(.none)
+            }
+        }
+
+        if eventType == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+            if eventKeyCode == BuddyPushToTalkShortcut.escapeKeyCode {
+                escapeKeyPublisher.send()
+            } else if BuddyPushToTalkShortcut.isTypeQuestionShortcut(keyCode: eventKeyCode, modifierFlagsRawValue: event.flags.rawValue) {
+                typeQuestionShortcutPublisher.send()
+                return Unmanaged.passUnretained(event)
+            }
+        }
         let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,

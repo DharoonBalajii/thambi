@@ -2,9 +2,8 @@
 //  leanring_buddyApp.swift
 //  leanring-buddy
 //
-//  Menu bar-only companion app. No dock icon, no main window — just an
-//  always-available status item in the macOS menu bar. Clicking the icon
-//  opens a floating panel with companion voice controls.
+//  Thambi is a full Mac app: a study window (Ask, Library, Notes) with a Dock icon, plus the
+//  always-available buddy in the menu bar that you talk to while you work.
 //
 
 import SwiftUI
@@ -14,11 +13,18 @@ struct leanring_buddyApp: App {
     @NSApplicationDelegateAdaptor(CompanionAppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // The app lives entirely in the menu bar panel managed by the AppDelegate.
-        // This empty Settings scene satisfies SwiftUI's requirement for at least
-        // one scene but is never shown (LSUIElement=true removes the app menu).
+        // The study window is an AppKit window managed by the AppDelegate. Settings (⌘,) shows
+        // the same controls as the menu bar panel.
         Settings {
-            EmptyView()
+            CompanionPanelView(companionManager: appDelegate.companionManager)
+                .frame(width: 340)
+                .preferredColorScheme(.dark)
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("Thambi Window") { appDelegate.showMainWindow() }
+                    .keyboardShortcut("0", modifiers: .command)
+            }
         }
     }
 }
@@ -28,7 +34,8 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
-    private let companionManager = CompanionManager()
+    let companionManager = CompanionManager()
+    private let mainWindowController = MainWindowController()
     private let voiceServerLauncher = VoiceServerLauncher()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -52,10 +59,35 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()
         }
+        StudyLibraryStore.shared.loadIfNeeded()
+        NotificationCenter.default.addObserver(forName: .thambiShowMainWindow, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showMainWindow() }
+        }
+        showMainWindow()
+        #if DEBUG
+        MainWindowDebug.runIfAsked(mainWindowController)
+        #endif
     }
+
+    func showMainWindow() {
+        mainWindowController.show()
+    }
+
+    /// Clicking the Dock icon brings the study window back after it was closed.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showMainWindow() }
+        return true
+    }
+
+    /// Closing the window keeps Thambi in the menu bar, ready to talk.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationWillTerminate(_ notification: Notification) {
         companionManager.stop()
         voiceServerLauncher.stop()
     }
+}
+
+extension Notification.Name {
+    static let thambiShowMainWindow = Notification.Name("ThambiShowMainWindow")
 }

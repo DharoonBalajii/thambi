@@ -48,7 +48,7 @@ enum BuddyTranscriptionProviderFactory {
             .stringValue(forKey: "VoiceTranscriptionProvider")
             .flatMap { PreferredProvider(rawValue: $0.lowercased()) }
 
-        if preferredProvider == .appleSpeech || ThambiKeychain.read(.assemblyAI) == nil {
+        if preferredProvider == .appleSpeech || ThambiSettings.questionSpeechOnDevice || ThambiKeychain.read(.assemblyAI) == nil {
             return AppleSpeechTranscriptionProvider()
         }
         return AssemblyAIStreamingTranscriptionProvider()

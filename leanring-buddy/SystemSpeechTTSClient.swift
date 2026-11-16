@@ -35,6 +35,18 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: configuration)
     }()
+    private static let localNeuralVoiceWarmUpURL = URL(string: "http://127.0.0.1:8789/warm")!
+
+    /// The voice server frees its model after a while without use, to save memory and battery.
+    /// This asks it to load the model again, in the background, as soon as a question starts,
+    /// so the voice is ready by the time the answer arrives. Sends nothing but the request itself.
+    static func warmUpNeuralVoice() {
+        var request = URLRequest(url: localNeuralVoiceWarmUpURL, timeoutInterval: 3)
+        request.httpMethod = "POST"
+        request.setValue("1", forHTTPHeaderField: "x-thambi-client")
+        voiceServerSession.dataTask(with: request).resume()
+    }
+
     /// Pause after a finished sentence, and after a comma-split phrase (shorter, as in real speech).
     private static let gapAfterSentenceSeconds: TimeInterval = 0.28
     private static let gapAfterPhraseSeconds: TimeInterval = 0.12
@@ -43,7 +55,10 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
     private static let earliestFirstSentenceSplitCharacterOffset = 28
 
     private struct SpeechChunk {
+        /// What the voice says (abbreviations spelled out: "E S P").
         let text: String
+        /// What captions show for this chunk (the sentence as written: "ESP").
+        let displayText: String
         let gapAfterSeconds: TimeInterval
         /// Fired the moment this chunk starts being spoken (only set on the first chunk of a segment).
         let onStartedSpeaking: (@MainActor () -> Void)?
@@ -57,6 +72,13 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
     private var neuralPlaybackGeneration = 0
     /// Called once when the whole answer has been spoken (not when it is interrupted).
     private var speechFinishedHandler: (@MainActor () -> Void)?
+
+    /// Captions: called with the sentence the voice has just started saying, and with nil when
+    /// speech ends or is stopped.
+    var onCaptionChanged: (@MainActor (String?) -> Void)?
+
+    /// The speed chosen in the panel (0.5x–1.5x), read live so a change applies mid-answer.
+    private var playbackSpeed: Double { ThambiSettings.voiceSpeed }
 
     // MARK: - macOS voice (fallback)
 
@@ -149,6 +171,7 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
         if speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
+        onCaptionChanged?(nil)
     }
 
     // MARK: - Neural voice playback
@@ -173,12 +196,19 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
         while !Task.isCancelled && neuralPlaybackGeneration == playbackGeneration {
             guard let audioPlayer = try? AVAudioPlayer(data: currentAudioData) else { return }
             activeAudioPlayer = audioPlayer
+            // Speed is applied here, as the audio plays, so the pitch stays natural and a change
+            // in the panel takes effect straight away.
+            audioPlayer.enableRate = true
+            audioPlayer.rate = Float(playbackSpeed)
             audioPlayer.play()
             // The voice has just started this chunk: this is the moment the cursor should move.
             currentChunk.onStartedSpeaking?()
+            onCaptionChanged?(currentChunk.displayText)
 
             while audioPlayer.isPlaying && !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 40_000_000)
+                let wantedRate = Float(playbackSpeed)
+                if audioPlayer.rate != wantedRate { audioPlayer.rate = wantedRate }
             }
             guard !Task.isCancelled, neuralPlaybackGeneration == playbackGeneration else { return }
 
@@ -186,11 +216,13 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
                 // That was the last chunk: the whole answer has been spoken.
                 let finishedHandler = speechFinishedHandler
                 speechFinishedHandler = nil
+                onCaptionChanged?(nil)
                 finishedHandler?()
                 return
             }
 
-            try? await Task.sleep(nanoseconds: UInt64(currentChunk.gapAfterSeconds * 1_000_000_000))
+            // Pauses shrink or stretch with the speed, like the speech itself.
+            try? await Task.sleep(nanoseconds: UInt64(currentChunk.gapAfterSeconds / playbackSpeed * 1_000_000_000))
             guard !Task.isCancelled, neuralPlaybackGeneration == playbackGeneration else { return }
 
             guard let upcomingAudioData = await upcomingAudioFetch.value else {
@@ -255,6 +287,7 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
                 let firstSegmentChunk = segmentChunks[0]
                 segmentChunks[0] = SpeechChunk(
                     text: firstSegmentChunk.text,
+                    displayText: firstSegmentChunk.displayText,
                     gapAfterSeconds: firstSegmentChunk.gapAfterSeconds,
                     onStartedSpeaking: { callbacksToFire.forEach { $0() } }
                 )
@@ -267,9 +300,9 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
             let chunk = speechChunks[chunkIndex]
             let isLastChunk = chunkIndex == speechChunks.count - 1
             if isLastChunk {
-                speechChunks[chunkIndex] = SpeechChunk(text: chunk.text, gapAfterSeconds: 0, onStartedSpeaking: chunk.onStartedSpeaking)
+                speechChunks[chunkIndex] = SpeechChunk(text: chunk.text, displayText: chunk.displayText, gapAfterSeconds: 0, onStartedSpeaking: chunk.onStartedSpeaking)
             } else if chunk.gapAfterSeconds == 0 {
-                speechChunks[chunkIndex] = SpeechChunk(text: chunk.text, gapAfterSeconds: gapAfterSentenceSeconds, onStartedSpeaking: chunk.onStartedSpeaking)
+                speechChunks[chunkIndex] = SpeechChunk(text: chunk.text, displayText: chunk.displayText, gapAfterSeconds: gapAfterSentenceSeconds, onStartedSpeaking: chunk.onStartedSpeaking)
             }
         }
         return speechChunks
@@ -280,7 +313,11 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
     /// sound chopped.
     private static func splitIntoSpeechChunks(_ text: String, splitLongFirstSentence: Bool) -> [SpeechChunk] {
         // LOCAL: abbreviations are spoken letter by letter ("ESP" -> "E S P"); only the audio text changes.
-        let sentences = SpeechSentenceSplitter.sentences(in: text).map { SpeechAcronymSpeller.spelledOut($0) }
+        // Captions keep the sentence as written.
+        func chunk(_ writtenText: String, gap: TimeInterval) -> SpeechChunk {
+            SpeechChunk(text: SpeechAcronymSpeller.spelledOut(writtenText), displayText: writtenText, gapAfterSeconds: gap, onStartedSpeaking: nil)
+        }
+        let sentences = SpeechSentenceSplitter.sentences(in: text)
         var speechChunks: [SpeechChunk] = []
 
         for (sentenceIndex, sentence) in sentences.enumerated() {
@@ -295,12 +332,12 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
                 let trailingPhrase = String(sentence[splitRange.upperBound...])
                     .trimmingCharacters(in: .whitespaces)
                 if !leadingPhrase.isEmpty && !trailingPhrase.isEmpty {
-                    speechChunks.append(SpeechChunk(text: leadingPhrase, gapAfterSeconds: gapAfterPhraseSeconds, onStartedSpeaking: nil))
-                    speechChunks.append(SpeechChunk(text: trailingPhrase, gapAfterSeconds: gapAfterThisSentence, onStartedSpeaking: nil))
+                    speechChunks.append(chunk(leadingPhrase, gap: gapAfterPhraseSeconds))
+                    speechChunks.append(chunk(trailingPhrase, gap: gapAfterThisSentence))
                     continue
                 }
             }
-            speechChunks.append(SpeechChunk(text: sentence, gapAfterSeconds: gapAfterThisSentence, onStartedSpeaking: nil))
+            speechChunks.append(chunk(sentence, gap: gapAfterThisSentence))
         }
         return speechChunks
     }
@@ -318,10 +355,15 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
         for chunk in chunks {
             let utterance = AVSpeechUtterance(string: chunk.text)
             utterance.voice = selectedVoice
-            utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-            utterance.postUtteranceDelay = chunk.gapAfterSeconds
-            if let startCallback = chunk.onStartedSpeaking {
-                utteranceStartCallbacks[ObjectIdentifier(utterance)] = startCallback
+            let speed = playbackSpeed
+            utterance.rate = min(AVSpeechUtteranceMaximumSpeechRate,
+                                 max(AVSpeechUtteranceMinimumSpeechRate, AVSpeechUtteranceDefaultSpeechRate * Float(speed)))
+            utterance.postUtteranceDelay = chunk.gapAfterSeconds / speed
+            let chunkStartCallback = chunk.onStartedSpeaking
+            let captionText = chunk.displayText
+            utteranceStartCallbacks[ObjectIdentifier(utterance)] = { [weak self] in
+                chunkStartCallback?()
+                self?.onCaptionChanged?(captionText)
             }
             speechSynthesizer.speak(utterance)
             lastQueuedUtterance = utterance
@@ -348,6 +390,7 @@ final class SystemSpeechTTSClient: NSObject, AVSpeechSynthesizerDelegate {
             self.activeUtteranceIdentifier = nil
             let finishedHandler = self.speechFinishedHandler
             self.speechFinishedHandler = nil
+            self.onCaptionChanged?(nil)
             finishedHandler?()
         }
     }

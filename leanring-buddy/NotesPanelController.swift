@@ -269,7 +269,7 @@ private struct NotesHeaderButton: View {
     }
 }
 
-private struct NotesLineView: View {
+struct NotesLineView: View {
     let line: NotesMarkdown.Line
 
     var body: some View {
@@ -290,8 +290,41 @@ private struct NotesLineView: View {
             .padding(.leading, CGFloat(level) * 16)
         case .paragraph:
             Text(line.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+        case .table(let hasHeader):
+            NotesTableView(rows: line.tableRows, hasHeader: hasHeader)
         case .spacer:
             Spacer().frame(height: 4)
         }
+    }
+}
+
+/// A small comparison table: bold header row, thin rules between rows, in the box's own text colour.
+struct NotesTableView: View {
+    let rows: [[AttributedString]]
+    let hasHeader: Bool
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                let isHeaderRow = hasHeader && rowIndex == 0
+                GridRow {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                        Text(cell)
+                            .font(.system(size: 12.5, weight: isHeaderRow ? .bold : .regular))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                if rowIndex < rows.count - 1 {
+                    Rectangle()
+                        .frame(height: isHeaderRow ? 1 : 0.5)
+                        .opacity(isHeaderRow ? 0.55 : 0.2)
+                        .gridCellUnsizedAxes(.horizontal)
+                }
+            }
+        }
+        .padding(10)
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(lineWidth: 0.8).opacity(0.3))
+        .padding(.vertical, 2)
     }
 }

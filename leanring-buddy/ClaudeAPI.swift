@@ -13,6 +13,18 @@ class ClaudeAPI {
     private let apiURL: URL
     var model: String
     private let session: URLSession
+    /// Token counts of the most recent answer (for the log and for cost checks). Counts only, no content.
+    private(set) var lastTokenUsage = TokenUsage()
+
+    struct TokenUsage: Equatable {
+        var inputTokens = 0
+        var cachedInputTokens = 0
+        var cacheWriteTokens = 0
+        var outputTokens = 0
+        var summary: String {
+            "input \(inputTokens), cached \(cachedInputTokens), cache-write \(cacheWriteTokens), output \(outputTokens)"
+        }
+    }
 
     init(proxyURL: String, model: String = "anthropic/claude-haiku-5.5") {
         self.apiURL = URL(string: proxyURL)!
@@ -56,16 +68,49 @@ class ClaudeAPI {
     /// Long spoken answers fit comfortably; one bad request can't run up cost.
     static let maximumOutputTokens = 1500
 
-    static func makeRequestBody(model requestedModel: String, systemPrompt: String, messages: [[String: Any]]) -> [String: Any] {
+    static func makeRequestBody(
+        model requestedModel: String,
+        systemPrompt: String,
+        subjectMemoryText: String? = nil,
+        documentText: String? = nil,
+        cachesDocumentText: Bool = true,
+        extraInstructions: String? = nil,
+        maximumOutputTokens: Int = ClaudeAPI.maximumOutputTokens,
+        messages: [[String: Any]]
+    ) -> [String: Any] {
         // Only the two approved models can ever be billed.
         let model = allowedModels.contains(requestedModel) ? requestedModel : defaultModel
+        // Prompt caching: the long, unchanging instructions are billed at ~10% when re-sent
+        // within a few minutes (measured: about half the cost of a Haiku question).
+        var systemBlocks: [[String: Any]] = [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]]
+        // A subject the student keeps in memory: the same text for every question about it, so it
+        // stays cached for an hour and is re-read at a tenth of the price. It sits before anything
+        // that changes per question, or the cache would miss.
+        if let subjectMemoryText, !subjectMemoryText.isEmpty {
+            // Blocks cached for an hour must come before blocks cached for five minutes, so the
+            // instructions in front of it are kept for an hour too.
+            systemBlocks[0]["cache_control"] = ["type": "ephemeral", "ttl": "1h"]
+            systemBlocks.append(["type": "text", "text": subjectMemoryText, "cache_control": ["type": "ephemeral", "ttl": "1h"]])
+        }
+        // An open PDF's text rides in its own cached block, so follow-up questions about the same
+        // document are billed at the cheap cached rate too.
+        if let documentText, !documentText.isEmpty {
+            // Passages picked for one question change every time; caching them would only add the
+            // cache-write surcharge, so they are sent as plain text.
+            systemBlocks.append(cachesDocumentText
+                ? ["type": "text", "text": documentText, "cache_control": ["type": "ephemeral"]]
+                : ["type": "text", "text": documentText])
+        }
+        // Instructions only some questions need (how to describe a drawing) go last, in their own
+        // block, so the big cached blocks before them stay byte-for-byte the same.
+        if let extraInstructions, !extraInstructions.isEmpty {
+            systemBlocks.append(["type": "text", "text": extraInstructions, "cache_control": ["type": "ephemeral"]])
+        }
         var body: [String: Any] = [
             "model": model,
-            "max_tokens": maximumOutputTokens,
+            "max_tokens": min(maximumOutputTokens, ClaudeAPI.maximumOutputTokens),
             "stream": true,
-            // Prompt caching: the long, unchanging instructions are billed at ~10% when re-sent
-            // within a few minutes (measured: about half the cost of a Haiku question).
-            "system": [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]],
+            "system": systemBlocks,
             "messages": messages
         ]
         // Haiku's hidden reasoning only adds cost and delay to short spoken answers.
@@ -133,6 +178,11 @@ class ClaudeAPI {
     func analyzeImageStreaming(
         images: [(data: Data, label: String)],
         systemPrompt: String,
+        subjectMemoryText: String? = nil,
+        documentText: String? = nil,
+        cachesDocumentText: Bool = true,
+        extraInstructions: String? = nil,
+        maximumOutputTokens: Int = ClaudeAPI.maximumOutputTokens,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
         onTextChunk: @MainActor @Sendable (String) -> Void
@@ -176,7 +226,10 @@ class ClaudeAPI {
                           userInfo: [NSLocalizedDescriptionKey: "No OpenRouter key in the Keychain"])
         }
 
-        let body = Self.makeRequestBody(model: model, systemPrompt: systemPrompt, messages: messages)
+        let body = Self.makeRequestBody(
+            model: model, systemPrompt: systemPrompt, subjectMemoryText: subjectMemoryText, documentText: documentText, cachesDocumentText: cachesDocumentText, extraInstructions: extraInstructions,
+            maximumOutputTokens: maximumOutputTokens, messages: messages
+        )
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = bodyData
         let payloadMB = Double(bodyData.count) / 1_048_576.0
@@ -209,6 +262,7 @@ class ClaudeAPI {
 
         // Parse SSE stream — each event is "data: {json}\n\n"
         var accumulatedResponseText = ""
+        var tokenUsage = TokenUsage()
 
         for try await line in byteStream.lines {
             // SSE lines look like: "data: {...}"
@@ -222,6 +276,16 @@ class ClaudeAPI {
                   let eventPayload = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
                   let eventType = eventPayload["type"] as? String else {
                 continue
+            }
+
+            // Token counts arrive at the start (input) and the end (output) of the stream.
+            let usagePayload = (eventPayload["message"] as? [String: Any])?["usage"] as? [String: Any]
+                ?? eventPayload["usage"] as? [String: Any]
+            if let usagePayload {
+                if let count = usagePayload["input_tokens"] as? Int { tokenUsage.inputTokens = count }
+                if let count = usagePayload["cache_read_input_tokens"] as? Int { tokenUsage.cachedInputTokens = count }
+                if let count = usagePayload["cache_creation_input_tokens"] as? Int { tokenUsage.cacheWriteTokens = count }
+                if let count = usagePayload["output_tokens"] as? Int { tokenUsage.outputTokens = count }
             }
 
             // We care about content_block_delta events that contain text chunks
@@ -238,6 +302,8 @@ class ClaudeAPI {
         }
 
         let duration = Date().timeIntervalSince(startTime)
+        lastTokenUsage = tokenUsage
+        print("🧮 Tokens: \(tokenUsage.summary)")
         return (text: accumulatedResponseText, duration: duration)
     }
 

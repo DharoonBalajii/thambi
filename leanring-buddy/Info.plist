@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
 	<key>LSUIElement</key>
-	<true/>
-	<key>VoiceTranscriptionProvider</key>
-	<string>assemblyai</string>
+	<false/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Thambi uses your microphone so you can talk to it</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Thambi needs screen recording access to see your screen and help you.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Thambi uses speech recognition to transcribe your voice when you talk to it</string>
+	<key>VoiceTranscriptionProvider</key>
+	<string>assemblyai</string>
 </dict>
 </plist>
