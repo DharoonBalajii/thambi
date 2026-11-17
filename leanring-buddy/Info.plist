@@ -4,6 +4,13 @@
 <dict>
 	<key>LSUIElement</key>
 	<false/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_thambi-study._tcp</string>
+		<string>_thambi-study._udp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Thambi uses your local network only when you turn on Study with friends, to find friends nearby and exchange messages with them.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Thambi uses your microphone so you can talk to it</string>
 	<key>NSScreenCaptureUsageDescription</key>

@@ -21,6 +21,9 @@ class ClaudeAPI {
         var cachedInputTokens = 0
         var cacheWriteTokens = 0
         var outputTokens = 0
+        var rupees: Double {
+            StudyCost.rupees(input: inputTokens, cached: cachedInputTokens, cacheWrite: cacheWriteTokens, output: outputTokens)
+        }
         var summary: String {
             "input \(inputTokens), cached \(cachedInputTokens), cache-write \(cacheWriteTokens), output \(outputTokens)"
         }

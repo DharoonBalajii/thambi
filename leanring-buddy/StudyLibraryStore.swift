@@ -32,21 +32,30 @@ nonisolated enum StudyMaterialReader {
         case unsupported(String)
         case unreadable(String)
         case empty(String)
+        case tooLarge(String)
 
         var errorDescription: String? {
             switch self {
             case .unsupported(let name): return "\(name) can't be read. Export it as PDF or Word first."
             case .unreadable(let name): return "\(name) couldn't be opened. It may be locked or damaged."
             case .empty(let name): return "No text was found in \(name)."
+            case .tooLarge(let name): return "\(name) is too large to read (over 30 MB of text). Split it or export the chapters you need as PDF."
             }
         }
     }
 
     static let maximumPages = 1_200
+    /// Text, Word and slide files bigger than this are refused: they are almost never study
+    /// material, and reading one whole could use all the memory.
+    static let maximumTextFileBytes = 30_000_000
     static let maximumPicturePages = 80
 
     static func read(_ fileURL: URL, kind: StudyMaterial.Kind) throws -> ReadResult {
         let name = fileURL.lastPathComponent
+        let byteCount = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if [.text, .note, .document, .slides].contains(kind), byteCount > maximumTextFileBytes {
+            throw ReadError.tooLarge(name)
+        }
         switch kind {
         case .pdf:
             guard let document = PDFDocument(url: fileURL), !document.isLocked else { throw ReadError.unreadable(name) }
@@ -135,7 +144,13 @@ nonisolated enum StudyMaterialReader {
         process.standardOutput = pipe
         process.standardError = Pipe()
         do { try process.run() } catch { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        // A slide's XML is small; anything far bigger is not a real slide (or is a zip bomb).
+        var data = Data()
+        let handle = pipe.fileHandleForReading
+        while let chunk = try? handle.read(upToCount: 65_536), !chunk.isEmpty {
+            data.append(chunk)
+            if data.count > 8_000_000 { process.terminate(); break }
+        }
         process.waitUntilExit()
         return String(decoding: data, as: UTF8.self)
     }
@@ -190,7 +205,7 @@ final class StudyLibraryStore: ObservableObject {
 
     // MARK: Places on disk
 
-    nonisolated private static var baseDirectory: URL {
+    nonisolated static var baseDirectory: URL {
         #if DEBUG
         // Test runs keep their library apart from the real one.
         if let testDirectory = UserDefaults.standard.string(forKey: "ThambiDebugLibraryDirectory") {
@@ -273,7 +288,7 @@ final class StudyLibraryStore: ObservableObject {
     @discardableResult
     private func addFile(_ fileURL: URL, subject: String, kind requestedKind: StudyMaterial.Kind?) -> UUID? {
         guard let kind = requestedKind ?? StudyLibrary.kind(forFileExtension: fileURL.pathExtension) else {
-            importItems.append(ImportItem(fileName: fileURL.lastPathComponent, status: .failed("This kind of file can't be read.")))
+            importItems.append(ImportItem(fileName: fileURL.lastPathComponent, status: .failed("\(fileURL.lastPathComponent) can't be read. Thambi reads PDF, Word, PowerPoint, pictures and text files.")))
             return nil
         }
         let importItem = ImportItem(fileName: fileURL.lastPathComponent, status: .reading)
@@ -403,19 +418,36 @@ final class StudyLibraryStore: ObservableObject {
     func saveNote(title: String, markdown: String, replacing existingPath: String? = nil) -> URL? {
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: Self.notesDirectory, withIntermediateDirectories: true)
-        let fileURL: URL
-        if let existingPath {
-            fileURL = URL(fileURLWithPath: existingPath)
-        } else {
-            let safeTitle = title.replacingOccurrences(of: #"[/:\\?%*|"<>]"#, with: "-", options: .regularExpression)
-                .trimmingCharacters(in: .whitespaces).prefix(60)
-            var candidate = Self.notesDirectory.appendingPathComponent("\(safeTitle.isEmpty ? "Note" : String(safeTitle)).md")
+        let safeTitle = String(title.replacingOccurrences(of: #"[/:\\?%*|"<>]"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces).prefix(60))
+        let baseName = safeTitle.isEmpty || safeTitle.hasPrefix(".") ? "Note" : safeTitle
+        func freeFileURL() -> URL {
+            var candidate = Self.notesDirectory.appendingPathComponent("\(baseName).md")
             var counter = 2
             while fileManager.fileExists(atPath: candidate.path) {
-                candidate = Self.notesDirectory.appendingPathComponent("\(safeTitle) \(counter).md")
+                candidate = Self.notesDirectory.appendingPathComponent("\(baseName) \(counter).md")
                 counter += 1
             }
-            fileURL = candidate
+            return candidate
+        }
+        let fileURL: URL
+        if let existingPath {
+            let existingURL = URL(fileURLWithPath: existingPath)
+            if StudyLibrary.displayTitle(forFileName: existingURL.lastPathComponent) == StudyLibrary.displayTitle(forFileName: baseName + ".md") {
+                fileURL = existingURL
+            } else {
+                // The title changed: the note's file is renamed to match, and its old entry goes.
+                fileURL = freeFileURL()
+                try? fileManager.moveItem(at: existingURL, to: fileURL)
+                if let oldMaterial = materials.first(where: { $0.sourcePath == existingPath }) {
+                    materials.removeAll { $0.id == oldMaterial.id }
+                    passagesByMaterial[oldMaterial.id] = nil
+                    try? fileManager.removeItem(at: Self.passagesFile(for: oldMaterial.id))
+                    saveMaterialsList()
+                }
+            }
+        } else {
+            fileURL = freeFileURL()
         }
         do {
             try markdown.write(to: fileURL, atomically: true, encoding: .utf8)
@@ -431,6 +463,18 @@ final class StudyLibraryStore: ObservableObject {
     }
 
     var notes: [StudyMaterial] { materials.filter { $0.kind == .note } }
+
+    /// Passages in reading order, for quizzes, cards and revision. Nil subject and material means all.
+    func passages(subject: String? = nil, materialID: UUID? = nil) -> [(passage: StudyPassage, material: StudyMaterial)] {
+        materials
+            .filter { material in
+                if let materialID { return material.id == materialID }
+                if let subject { return material.subject == subject }
+                return true
+            }
+            .sorted { $0.addedAt < $1.addedAt }
+            .flatMap { material in (passagesByMaterial[material.id] ?? []).map { ($0, material) } }
+    }
 
     // MARK: Searching
 

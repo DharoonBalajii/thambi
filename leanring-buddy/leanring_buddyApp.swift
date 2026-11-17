@@ -18,7 +18,6 @@ struct leanring_buddyApp: App {
         Settings {
             CompanionPanelView(companionManager: appDelegate.companionManager)
                 .frame(width: 340)
-                .preferredColorScheme(.dark)
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -43,6 +42,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         print("🎯 Thambi: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
+        DS.Typeface.register()
+        Task.detached(priority: .utility) { ThambiPrivacy.secureDataDirectory() }
+        ThambiSettings.applyAppearance()
 
         // LOCAL: API keys live in the Keychain. A ~/clicky/thambi-keys.env file, if present, is imported and deleted.
         let importedKeyCount = ThambiKeychain.importFromKeyFileIfPresent()
@@ -63,6 +65,15 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: .thambiShowMainWindow, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.showMainWindow() }
         }
+        // A drawing or 3D model a friend shared is drawn by the same panel Thambi's own drawings use.
+        NotificationCenter.default.addObserver(forName: StudySocialStore.showDrawingNotification, object: nil, queue: .main) { [weak self] note in
+            let source = note.userInfo?["source"] as? String ?? ""
+            MainActor.assumeIsolated {
+                guard let drawing = ThambiDrawing.parse(source) else { return }
+                self?.companionManager.drawingPanelController.show(drawing)
+            }
+        }
+        _ = StudySocialStore.shared
         showMainWindow()
         #if DEBUG
         MainWindowDebug.runIfAsked(mainWindowController)
@@ -90,4 +101,5 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
 extension Notification.Name {
     static let thambiShowMainWindow = Notification.Name("ThambiShowMainWindow")
+    static let thambiShowLegalDocument = Notification.Name("ThambiShowLegalDocument")
 }

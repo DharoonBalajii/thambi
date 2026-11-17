@@ -19,9 +19,15 @@ enum NotesMarkdown {
 
     /// The notes box only opens when the user's own words include "write" (write, writes,
     /// writing, written, wrote), e.g. "write down the key points".
+    /// Technical terms that contain the word ("write-ahead log", "read/write", "write lock") are
+    /// not requests.
     static func userAskedToWrite(_ transcript: String) -> Bool {
-        transcript.range(of: #"\b(write|writes|writing|written|wrote)\b"#,
-                         options: [.regularExpression, .caseInsensitive]) != nil
+        let withoutTerms = transcript.replacingOccurrences(
+            of: #"(?i)\bread\s*(/|-|and|&)\s*writ\w*"#, with: " ", options: .regularExpression)
+        let writeRequest = #"\b(write|writes|writing|written|wrote)\b(?![-/]|\s+(ahead|back|through|lock|locks|operation|operations|access|permission|permissions|protect|protected|once|barrier|buffer|cycle|amplification|skew|latency|speed|policy|miss|hit|head|endurance)\b)"#
+        let notesRequest = #"\b(make|take|prepare|create|give me|jot down)\s+(some |short |brief |quick |detailed |exam |revision |my )?notes\b"#
+        return withoutTerms.range(of: writeRequest, options: [.regularExpression, .caseInsensitive]) != nil
+            || withoutTerms.range(of: notesRequest, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// Reply drafting: the box also opens when the user's own words ask for a draft or a reply,

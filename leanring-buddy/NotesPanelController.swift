@@ -108,6 +108,7 @@ final class NotesPanelController: ObservableObject {
         notesPanel.hasShadow = true
         notesPanel.isMovableByWindowBackground = true
         notesPanel.level = .floating
+        notesPanel.appearance = NSAppearance(named: .darkAqua)
         notesPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         notesPanel.hidesOnDeactivate = false
         notesPanel.becomesKeyOnlyIfNeeded = true
@@ -201,7 +202,7 @@ struct NotesPanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "note.text")
-                Text("Notes").font(.system(size: 13, weight: .semibold))
+                Text("Notes").font(DS.font(13, .semibold))
                 Spacer()
                 NotesHeaderButton(systemImage: "textformat", label: controller.textStyle.label, color: textColor) {
                     controller.cycleTextStyle()
@@ -257,8 +258,8 @@ private struct NotesHeaderButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: systemImage).font(.system(size: 11, weight: .semibold))
-                if let label { Text(label).font(.system(size: 11, weight: .medium)) }
+                Image(systemName: systemImage).font(DS.font(11, .semibold))
+                if let label { Text(label).font(DS.font(11, .medium)) }
             }
             .foregroundColor(color.opacity(0.9))
             .padding(.horizontal, 7)
@@ -275,21 +276,21 @@ struct NotesLineView: View {
     var body: some View {
         switch line.kind {
         case .heading:
-            Text(line.text).font(.system(size: 15, weight: .bold)).padding(.top, 2)
+            Text(line.text).font(DS.font(15, .bold)).padding(.top, 2)
         case .bullet(let level):
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Text(level == 0 ? "•" : "◦").font(.system(size: 13, weight: .bold))
-                Text(line.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                Text(level == 0 ? "•" : "◦").font(DS.font(13, .bold))
+                Text(line.text).font(DS.font(13)).fixedSize(horizontal: false, vertical: true)
             }
             .padding(.leading, CGFloat(level) * 16)
         case .numbered(let number, let level):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(number).").font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                Text(line.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                Text("\(number).").font(DS.font(13, .semibold)).monospacedDigit()
+                Text(line.text).font(DS.font(13)).fixedSize(horizontal: false, vertical: true)
             }
             .padding(.leading, CGFloat(level) * 16)
         case .paragraph:
-            Text(line.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+            Text(line.text).font(DS.font(13)).fixedSize(horizontal: false, vertical: true)
         case .table(let hasHeader):
             NotesTableView(rows: line.tableRows, hasHeader: hasHeader)
         case .spacer:
@@ -310,7 +311,7 @@ struct NotesTableView: View {
                 GridRow {
                     ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
                         Text(cell)
-                            .font(.system(size: 12.5, weight: isHeaderRow ? .bold : .regular))
+                            .font(DS.font(12.5, isHeaderRow ? .bold : .regular))
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }

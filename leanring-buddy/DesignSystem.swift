@@ -2,7 +2,8 @@
 //  DesignSystem.swift
 //  leanring-buddy
 //
-//  Centralized design system: graphite surfaces, amber for what you do, cool blue for Thambi,
+//  Centralized design system: ink-and-paper surfaces in light and dark, marigold orange for what
+//  you do, indigo for Thambi, Plus Jakarta Sans for words,
 //  with a unified button style system. All colors, button styles, and
 //  interaction states are defined here as the single source of truth.
 //
@@ -25,44 +26,44 @@ enum DS {
         // Higher surfaces are lighter, creating a sense of depth.
 
         /// The deepest background — used for the main app window fill.
-        static let background = Color(hex: "#0D1013")
+        static let background = Color(light: "#FBFBFE", dark: "#0E0F1D")
 
         /// First elevation layer — used for cards, sidebar, top bar backgrounds.
-        static let surface1 = Color(hex: "#15191C")
+        static let surface1 = Color(light: "#F4F5FB", dark: "#16172B")
 
         /// Second elevation layer — used for input fields, elevated cards, chat bubbles.
-        static let surface2 = Color(hex: "#1E2226")
+        static let surface2 = Color(light: "#ECEEF7", dark: "#1E2039")
 
         /// Third elevation layer — used for hover backgrounds on interactive elements.
-        static let surface3 = Color(hex: "#272C31")
+        static let surface3 = Color(light: "#E2E5F2", dark: "#282A49")
 
         /// Fourth elevation layer — used for active/pressed states on interactive elements.
-        static let surface4 = Color(hex: "#30363C")
+        static let surface4 = Color(light: "#D5D9EA", dark: "#33365B")
 
         // ── Borders ──────────────────────────────────────────────────
 
         /// Subtle border — used for card outlines, dividers, input field borders.
-        static let borderSubtle = Color(hex: "#2D3135")
+        static let borderSubtle = Color(light: "#E3E5F0", dark: "#2A2C48")
 
         /// Strong border — used for focused inputs, hovered card outlines.
-        static let borderStrong = Color(hex: "#484E54")
+        static let borderStrong = Color(light: "#C6C9DC", dark: "#474A73")
 
         // ── Text ─────────────────────────────────────────────────────
 
         /// Primary text — main body text, titles, headings.
-        static let textPrimary = Color(hex: "#ECEFF2")
+        static let textPrimary = Color(light: "#14152B", dark: "#EEEFFB")
 
         /// Secondary text — descriptions, hints, muted labels.
-        static let textSecondary = Color(hex: "#B4B9BE")
+        static let textSecondary = Color(light: "#474A63", dark: "#BBBDD8")
 
         /// Tertiary text — very muted, used for section labels, timestamps, disabled text.
-        static let textTertiary = Color(hex: "#868B91")
+        static let textTertiary = Color(light: "#6B6E88", dark: "#8C8FB0")
 
         /// Text on top of the amber accent fill, like the primary button label (about 10:1).
-        static let textOnAccent = Color(hex: "#1C0E00")
+        static let textOnAccent = Color(light: "#FFFFFF", dark: "#2A1000")
 
         /// The deepest well: text inputs and the mascot's eyes.
-        static let well = Color(hex: "#06080B")
+        static let well = Color(light: "#FFFFFF", dark: "#090A15")
 
         // ── Tailwind Blue Scale ─────────────────────────────────────
         // Full Tailwind CSS v4 blue palette for consistent blue usage.
@@ -94,66 +95,66 @@ enum DS {
         // button, the current choice, the step waiting for approval.
 
         /// Accent fill — used for solid button backgrounds.
-        static let accent = Color(hex: "#F7B83D")
+        static let accent = Color(light: "#C2410C", dark: "#FB923C")
 
         /// Accent hover — a little brighter.
-        static let accentHover = Color(hex: "#FFC75A")
+        static let accentHover = Color(light: "#A3360A", dark: "#FDA65B")
 
         /// Accent-coloured text and icons on dark backgrounds.
-        static let accentText = Color(hex: "#F7B83D")
+        static let accentText = Color(light: "#C2410C", dark: "#FB923C")
 
         /// Quiet amber tint behind the current choice.
-        static let accentSubtle = Color(hex: "#38280A")
+        static let accentSubtle = Color(light: "#FFEDD9", dark: "#3A1F0C")
 
         // ── Cool: blue means "Thambi" ───────────────────────────────
         // Cool blue marks Thambi itself: the mascot, and what it is doing or reading.
 
-        static let cool = Color(hex: "#6EBCFC")
+        static let cool = Color(light: "#4F46E5", dark: "#A5B4FC")
 
         /// Two extra hues used only inside drawings, where shapes need telling apart.
         static let drawingTeal = Color(hex: "#4FC4B8")
         static let drawingGrey = Color(hex: "#9DA2A8")
         static let drawingWhite = Color(hex: "#D5DAE0")
-        static let coolDeep = Color(hex: "#328BD6")
-        static let coolSubtle = Color(hex: "#142E43")
+        static let coolDeep = Color(light: "#4338CA", dark: "#6366F1")
+        static let coolSubtle = Color(light: "#EBEDFF", dark: "#1F2152")
 
         // ── Semantic Colors ──────────────────────────────────────────
 
         /// Destructive/error actions — delete buttons, error messages, close button hover.
-        static let destructive = Color(hex: "#F66D67")
+        static let destructive = Color(light: "#DC2626", dark: "#F87171")
 
         /// Destructive hover state.
-        static let destructiveHover = Color(hex: "#FF8580")
+        static let destructiveHover = Color(light: "#B91C1C", dark: "#FCA5A5")
 
         /// Destructive used for text on dark backgrounds (brighter for readability).
-        static let destructiveText = Color(hex: "#F66D67")
+        static let destructiveText = Color(light: "#C81E1E", dark: "#F87171")
 
         /// Success — checkmarks, granted status, completion indicators.
         /// Independent green so success states are visually distinct from the blue accent.
-        static let success = Color(hex: "#61CB7C")
-        static let successSubtle = Color(hex: "#162519")
-        static let destructiveSubtle = Color(hex: "#2F1A18")
+        static let success = Color(light: "#15803D", dark: "#4ADE80")
+        static let successSubtle = Color(light: "#E3F6E9", dark: "#12281B")
+        static let destructiveSubtle = Color(light: "#FDE8E8", dark: "#321A1C")
 
         /// Warning — caution messages, manual verification failure explanations.
-        static let warning = Color(hex: "#F7B83D")
+        static let warning = Color(light: "#B45309", dark: "#FBBF24")
 
         /// Warning text — brighter variant for text on dark backgrounds.
-        static let warningText = Color(hex: "#F7B83D")
+        static let warningText = Color(light: "#B45309", dark: "#FBBF24")
 
         /// Info/feature highlight — used for prompt card headers, code highlights.
         /// Lighter than accentText so informational elements are visually distinct
         /// from interactive accent-colored elements.
-        static let info = Color(hex: "#70B8FF")               // Radix Blue 9
+        static let info = Color(light: "#4F46E5", dark: "#A5B4FC")               // Radix Blue 9
 
         /// Inline code text color — slightly brighter blue for monospace code snippets.
-        static let codeText = Color(hex: "#9DC2FF")           // Radix Blue 11 variant
+        static let codeText = Color(light: "#4338CA", dark: "#B4C0FF")           // Radix Blue 11 variant
 
         // ── Overlay Cursor ───────────────────────────────────────────
 
         /// The blue cursor/bubble color used in OverlayWindow.
         /// Kept distinct from the accent since it serves a different purpose
         /// (screen overlay vs in-app UI).
-        static let overlayCursorBlue = Color(hex: "#328BD6")
+        static let overlayCursorBlue = Color(hex: "#6366F1")
 
         // ── Floating Button Gradient ─────────────────────────────────
 
@@ -195,6 +196,36 @@ enum DS {
         }
     }
 
+    // MARK: - Type
+    // Plus Jakarta Sans (SIL Open Font License) for everything read as words; the system's
+    // monospaced face for measured values and code. Indian scripts fall back to the system fonts.
+
+    enum Typeface {
+        static let family = "PlusJakartaSans"
+
+        /// Registers the bundled font files once, at launch.
+        static func register() {
+            for url in Bundle.main.urls(forResourcesWithExtension: "ttf", subdirectory: nil) ?? [] {
+                CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+            }
+        }
+
+        static func name(for weight: SwiftUI.Font.Weight) -> String {
+            switch weight {
+            case .medium: return family + "-Medium"
+            case .semibold: return family + "-SemiBold"
+            case .bold: return family + "-Bold"
+            case .heavy, .black: return family + "-ExtraBold"
+            default: return family + "-Regular"
+            }
+        }
+    }
+
+    /// The interface font at a fixed size.
+    static func font(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font {
+        .custom(Typeface.name(for: weight), fixedSize: size)
+    }
+
     // MARK: - Spacing (for reference, not enforced)
 
     enum Spacing {
@@ -211,13 +242,13 @@ enum DS {
 
     enum CornerRadius {
         /// Small elements like tags, badges.
-        static let small: CGFloat = 6
+        static let small: CGFloat = 8
         /// Buttons, input fields, small cards.
-        static let medium: CGFloat = 8
+        static let medium: CGFloat = 10
         /// Cards, dialogs, chat bubbles.
-        static let large: CGFloat = 10
+        static let large: CGFloat = 14
         /// Large panels, permission cards.
-        static let extraLarge: CGFloat = 12
+        static let extraLarge: CGFloat = 18
         /// Pill-shaped buttons (the continue button).
         static let pill: CGFloat = .infinity
     }
@@ -274,7 +305,7 @@ struct DSPrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .medium))
+            .font(DS.font(16, .medium))
             .foregroundColor(DS.Colors.textOnAccent)
             .frame(maxWidth: isFullWidth ? .infinity : nil)
             .padding(.vertical, 14)
@@ -353,7 +384,7 @@ struct DSSecondaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .medium))
+            .font(DS.font(16, .medium))
             .foregroundColor(DS.Colors.textPrimary)
             .frame(maxWidth: isFullWidth ? .infinity : nil)
             .padding(.vertical, 12)
@@ -390,7 +421,7 @@ struct DSTertiaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .medium))
+            .font(DS.font(16, .medium))
             .foregroundColor(
                 configuration.isPressed
                     ? DS.Colors.accentHover
@@ -435,7 +466,7 @@ struct DSTextButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: fontSize, weight: .medium))
+            .font(DS.font(fontSize, .medium))
             .foregroundColor(
                 configuration.isPressed
                     ? DS.Colors.textPrimary
@@ -461,7 +492,7 @@ struct DSOutlinedButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .medium))
+            .font(DS.font(16, .medium))
             .foregroundColor(DS.Colors.textPrimary)
             .frame(maxWidth: isFullWidth ? .infinity : nil)
             .padding(.vertical, 12)
@@ -512,7 +543,7 @@ struct DSDestructiveButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .medium))
+            .font(DS.font(16, .medium))
             .foregroundColor(
                 isHovered || configuration.isPressed
                     ? .white
@@ -578,7 +609,7 @@ struct DSIconButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: size * 0.43, weight: .semibold))
+            .font(DS.font(size * 0.43, .semibold))
             .foregroundColor(iconColor(isPressed: configuration.isPressed))
             .frame(width: size, height: size)
             .background(
@@ -624,7 +655,7 @@ struct DSIconButtonStyle: ButtonStyle {
                 Group {
                     if isTooltipVisible, let text = tooltipText, !text.isEmpty {
                         Text(text)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(DS.font(11, .medium))
                             .foregroundColor(DS.Colors.textSecondary)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -861,7 +892,23 @@ extension View {
 
 // MARK: - Color Utilities
 
+extension NSColor {
+    convenience init(hexString: String) {
+        var value: UInt64 = 0
+        Scanner(string: hexString.replacingOccurrences(of: "#", with: "")).scanHexInt64(&value)
+        self.init(srgbRed: CGFloat((value & 0xFF0000) >> 16) / 255, green: CGFloat((value & 0x00FF00) >> 8) / 255,
+                  blue: CGFloat(value & 0x0000FF) / 255, alpha: 1)
+    }
+}
+
 extension Color {
+    /// A colour with a light and a dark value; it follows the appearance of the window it is in.
+    init(light: String, dark: String) {
+        self.init(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(hexString: dark) : NSColor(hexString: light)
+        })
+    }
+
     /// Create a Color from a hex string like "#FF5733" or "FF5733".
     init(hex: String) {
         let hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)

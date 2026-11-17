@@ -74,8 +74,41 @@ nonisolated struct StudyPassage: Codable, Equatable, Sendable {
     /// 1-based page, or nil when the material has no pages.
     var page: Int?
     var text: String
-    /// Meaning vector from the on-device language model, stored small. Empty when unavailable.
+    /// Meaning vector from the on-device language model. Empty when unavailable.
     var meaning: [Float] = []
+
+    init(materialID: UUID, page: Int?, text: String, meaning: [Float] = []) {
+        self.materialID = materialID
+        self.page = page
+        self.text = text
+        self.meaning = meaning
+    }
+
+    // Stored as raw 32-bit floats (base64) rather than a list of decimal numbers: about a third
+    // of the size and much faster to load. Older libraries saved as a list still open.
+    private enum CodingKeys: String, CodingKey { case materialID, page, text, meaning, meaningData }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        materialID = try container.decode(UUID.self, forKey: .materialID)
+        page = try container.decodeIfPresent(Int.self, forKey: .page)
+        text = try container.decode(String.self, forKey: .text)
+        if let data = try container.decodeIfPresent(Data.self, forKey: .meaningData) {
+            meaning = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        } else {
+            meaning = try container.decodeIfPresent([Float].self, forKey: .meaning) ?? []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(materialID, forKey: .materialID)
+        try container.encodeIfPresent(page, forKey: .page)
+        try container.encode(text, forKey: .text)
+        if !meaning.isEmpty {
+            try container.encode(meaning.withUnsafeBufferPointer { Data(buffer: $0) }, forKey: .meaningData)
+        }
+    }
 }
 
 /// One passage chosen for a question, with its number in the answer's sources.
@@ -387,8 +420,9 @@ nonisolated enum StudyLibrary {
         let rules: String
         switch mode {
         case .restricted:
+            let allowed = isSpoken ? "the student's sources below and what is on their screen (their own material)" : "the student's sources below"
             rules = """
-            restricted study mode: answer ONLY from the student's sources below. do not use outside knowledge, even if you know the answer. if the sources don't contain it, say plainly that it isn't in their materials and suggest what to look for or add. explain, give hints and ask a guiding question; never write finished assignment answers, essays or code for them to submit.
+            restricted study mode: answer ONLY from \(allowed). do not use outside knowledge, even if you know the answer. if the sources don't contain it, say plainly that it isn't in their materials and suggest what to look for or add. explain, give hints and ask a guiding question; never write finished assignment answers, essays or code for them to submit.
             """
         case .read, .write:
             rules = """
@@ -508,5 +542,76 @@ nonisolated enum StudyLibrary {
         let spaced = withoutExtension.replacingOccurrences(of: #"[_]+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
         return spaced.isEmpty ? fileName : spaced
+    }
+}
+
+// MARK: - Finding a passage on its page
+
+nonisolated extension StudyLibrary {
+
+    /// Where a passage sits in the text of its page, as a UTF-16 range for PDFKit, so the page can
+    /// be opened with the passage highlighted. Spacing and line breaks may differ between the two;
+    /// nil when the passage can't be found (a page read from a picture has no text layer).
+    static func passageRange(of passage: String, inPageText pageText: String) -> NSRange? {
+        let page = collapsed(Array(pageText.utf16))
+        let wanted = collapsed(Array(passage.utf16)).units
+        guard wanted.count >= 12, !page.units.isEmpty else { return nil }
+        let pageString = String(utf16CodeUnits: page.units, count: page.units.count)
+        let wantedString = String(utf16CodeUnits: wanted, count: wanted.count)
+
+        func find(_ piece: String, from start: Int = 0) -> Range<Int>? {
+            let startIndex = String.Index(utf16Offset: min(start, page.units.count), in: pageString)
+            guard let found = pageString.range(of: piece, range: startIndex..<pageString.endIndex) else { return nil }
+            return found.lowerBound.utf16Offset(in: pageString)..<found.upperBound.utf16Offset(in: pageString)
+        }
+        func piece(_ range: Range<Int>) -> String {
+            let units = Array(wanted[max(0, range.lowerBound)..<min(wanted.count, range.upperBound)])
+            return String(utf16CodeUnits: units, count: units.count)
+        }
+
+        var start: Int?
+        var end: Int?
+        if let whole = find(wantedString) {
+            start = whole.lowerBound
+            end = whole.upperBound
+        } else {
+            // The ends may have been joined from other lines: the first stretch that is on the page
+            // marks the start, the last one after it marks the end.
+            let window = min(50, wanted.count)
+            let offsets = Array(stride(from: 0, through: wanted.count - window, by: 25)) + [wanted.count - window]
+            for offset in offsets {
+                if let found = find(piece(offset..<(offset + window))) { start = found.lowerBound; end = found.upperBound; break }
+            }
+            if let foundStart = start {
+                for offset in offsets.reversed() {
+                    if let found = find(piece(offset..<(offset + window)), from: foundStart) { end = max(end ?? 0, found.upperBound); break }
+                }
+            }
+        }
+        guard let start, let end, end > start else { return nil }
+        let originalStart = page.originalOffsets[start]
+        let originalEnd = page.originalOffsets[end - 1] + 1
+        return NSRange(location: originalStart, length: originalEnd - originalStart)
+    }
+
+    /// Whitespace runs become one space and A-Z becomes a-z; each kept unit remembers where it was.
+    private static func collapsed(_ units: [UInt16]) -> (units: [UInt16], originalOffsets: [Int]) {
+        var result: [UInt16] = []
+        var offsets: [Int] = []
+        result.reserveCapacity(units.count)
+        var lastWasSpace = true
+        for (offset, unit) in units.enumerated() {
+            let isSpace = unit == 32 || unit == 9 || unit == 10 || unit == 13 || unit == 0xA0 || unit == 0x2028 || unit == 12
+            if isSpace {
+                if !lastWasSpace { result.append(32); offsets.append(offset) }
+                lastWasSpace = true
+            } else {
+                result.append((65...90).contains(unit) ? unit + 32 : unit)
+                offsets.append(offset)
+                lastWasSpace = false
+            }
+        }
+        if result.last == 32 { result.removeLast(); offsets.removeLast() }
+        return (result, offsets)
     }
 }

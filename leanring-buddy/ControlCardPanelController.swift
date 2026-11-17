@@ -97,6 +97,7 @@ final class ControlCardPanelController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .statusBar
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
@@ -133,21 +134,21 @@ struct ControlCardView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(headline)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(DS.font(14, .semibold))
                         .foregroundColor(DS.Colors.textPrimary)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
 
                     if let detail {
                         Text(detail)
-                            .font(.system(size: 12))
+                            .font(DS.font(12))
                             .foregroundColor(DS.Colors.textSecondary)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if isRisky {
                         Text("Check this one before you allow it.")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(DS.font(12, .medium))
                             .foregroundColor(DS.Colors.destructiveText)
                     }
                 }
@@ -250,7 +251,7 @@ private struct ControlCardButton: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(DS.font(13, .semibold))
                 Text(keyHint)
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .padding(.horizontal, 5)

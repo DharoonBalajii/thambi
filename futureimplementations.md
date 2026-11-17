@@ -246,3 +246,53 @@ guessed, shortened history, and an on-device speech option.
 Measure every one of these on real tasks before keeping it: a cheaper step that needs an extra
 step to recover is not cheaper. The test hooks (`-ThambiDebugControlTask`, `-ThambiDebugControlLive`,
 `-ThambiDebugQuestion`) print token counts for exactly this.
+
+## Part 3: features for studying (researched and planned, 2026-11-16)
+
+Where these come from: a full test pass of the app (below), what the leading study tools do (NotebookLM's flashcards, quizzes, mind maps and audio overviews; Quizlet and Knowt for flashcards; Indian previous-year-paper apps), the "learning modes" ChatGPT, Gemini and Claude added in 2025, and learning research. In that research, practice testing and spaced practice come out as the two most effective study techniques: quizzing improves results by about half a standard deviation (Hedges' g ≈ 0.50), and spaced practice beats cramming by g ≈ 0.5 to 0.74. Most of Thambi today *explains*; the biggest gains are in making students *recall*.
+
+Every idea is held to the same three rules: cost (a normal action stays near ₹0.03), privacy (stays on the Mac unless it must go to the AI service), safety (nothing done without the student's say-so).
+
+### Ranked
+
+| # | Feature | Why it matters | Cost to run | Effort |
+|---|---|---|---|---|
+| 1 | **Quiz me** on a subject or note | Retrieval practice, the strongest technique. Questions come from the student's own passages, each with its source; answers are checked and the wrong ones explained. Restricted mode friendly. | ~₹0.03 for 5 questions; checking an answer ~₹0.01 | Medium |
+| 2 | **Flashcards with spaced review (FSRS)** | Spaced practice. Cards made from materials, notes or a quiz's wrong answers; reviewed daily in the window. FSRS is open source and in published benchmarks predicts forgetting better than Anki's older SM-2. Reviewing never calls the AI. | Making 10 cards ~₹0.03; reviews free | Medium |
+| 3 | **Exam planner with previous-year papers** | Indian university exams repeat topics. Add PYQ papers to a subject; Thambi maps each question to a unit, counts what repeats and how many marks it carries, and builds a day-by-day plan to the exam date that spaces revision and puts heavy topics first. | One pass per paper ~₹0.05; plan is computed locally | Medium |
+| 4 | **Answer in marks format** | "Answer for 2 / 5 / 10 marks": definition, diagram (the drawing engine), example, points, sized to the marks. Matches how answers are graded here. | Same as a question | Small |
+| 5 | **Teach-back (Feynman) mode** | The student explains a topic by voice; Thambi compares it with their materials, says what was right, missing or wrong, and asks one guiding question. Uses the existing voice and library. | ~₹0.03 per attempt | Small |
+| 6 | **Concept map of a subject** | NotebookLM's most-used visual. One call outlines the subject's topics; the existing flow/tree drawing engine draws it; clicking a topic asks about it. | ~₹0.02 per map | Small |
+| 7 | **Spoken revision of a unit** | Like NotebookLM audio overviews, but the voice is already free and offline. One call writes a 5-minute script from the unit; the local voice reads it. Pause and ask questions mid-way. | ~₹0.04 per script; voice free | Small |
+| 8 | **Open the source at the exact page** | Sources already know the page. Show the PDF inside the window, scrolled to the page with the passage highlighted (PDFKit), instead of opening the whole file. | Free | Small |
+| 9 | **Indian-language questions and answers** | Thambi is a Tamil name. Apple's newer on-device contextual embeddings cover many scripts, so a Tamil or Hindi question can find English notes; answers can be explained in Tamil, Hindi or a mix, spoken by a matching voice. | Same as a question | Medium |
+| 10 | **Lecture to notes** | Record a lecture (with the lecturer's permission), transcribe on the Mac (Apple Speech, free), turn it into notes that join the library. | Transcription free; notes ~₹0.05 per hour | Medium |
+| 11 | **Free offline answers (optional)** | A small model run on the Mac (Gemma or Qwen at 4-bit, around 35 words a second on an 8 GB Mac) for Restricted-mode questions over the student's materials. Zero cost and works offline; weaker than Haiku, so opt-in and labelled. Needs a ~4 GB download the student approves. | Free | Large |
+| 12 | **Import from iPhone** | Continuity Camera: photograph a page or whiteboard on the iPhone and it lands in the library, read by the Mac's text recognition. | Free | Small |
+| 13 | **Study time and streaks, kept on the Mac** | Focus timer (Pomodoro), minutes per subject, cards due. Nothing leaves the Mac. | Free | Small |
+| 14 | **Export** | Notes to PDF; flashcards to an Anki deck (`.apkg`) or CSV, so students are never locked in. | Free | Small |
+
+### Smaller improvements found while testing
+
+- Library: "Dismiss all" for failed files; rename a subject; drag a material onto a subject.
+- A search box over all materials and notes (⌘K), free and local.
+- Ask: a "regenerate" button, and showing the cost of each answer next to it (from the token counts already measured).
+- Keep in memory: show how much of a subject fits ("all of it" or "first 60%") and when the cache will expire.
+- Retrieval check: a small set of known questions per test subject, run after each change, so search quality is measured, not guessed (dev tool).
+
+### Not recommended
+
+- Downloading other people's notes or shared decks: copyright and quality problems, and it breaks the "your own materials" promise.
+- Cloud sync of the library: a server would see students' materials. If ever wanted, iCloud Drive files only, end-to-end, opt-in.
+- An exam "lock" that stops the student switching modes: Thambi is the student's tool, not a proctor.
+
+### Suggested order
+
+Build 4 and 8 first (small, immediately useful), then 1 and 2 together (quiz wrong answers become flashcards), then 3. That turns Thambi from an explainer into a revision system, at about the same cost per day.
+
+### Test pass that informed this (2026-11-16)
+
+- Unit tests moved into the repo (`Tests/`, run with `scripts/run-tests.sh`): 106 checks of the pure rules, plus a drawing suite, all passing. The earlier tests had been lost with a temporary folder.
+- Bugs found and fixed: "write-ahead log" counted as a request to write (would have auto-saved notes); a stopped answer could re-enable Ask during the next answer; renaming a note was lost; huge text, Word or slide files were read without a size limit; source numbers from earlier answers leaked into the next question's history; the panel did not show the study mode even though it governs voice answers; the reason a file type was refused didn't name the file.
+- Library: 400-page PDF read in about 30 seconds; search over 5,000 passages takes 2 ms; meaning vectors now stored as binary (library loads about 7 times faster, half the size; old libraries still open). Empty, damaged, password-locked, Pages and unknown files each get a clear message; folders become subjects; hidden files are skipped; re-adding a file replaces it.
+- Voice answers use the library only when it plainly answers (a general-knowledge question sent no passages); Restricted mode treats the screen as the student's own material, now stated in the instructions.

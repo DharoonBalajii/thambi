@@ -46,7 +46,6 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         newWindow.isReleasedWhenClosed = false
         newWindow.minSize = NSSize(width: 820, height: 560)
         newWindow.backgroundColor = NSColor(DS.Colors.background)
-        newWindow.appearance = NSAppearance(named: .darkAqua)
         newWindow.contentView = NSHostingView(rootView: MainWindowView(library: library, chat: chat, page: Self.initialPage))
         newWindow.setFrameAutosaveName("ThambiMainWindow")
         if newWindow.frame.origin == .zero { newWindow.center() }
@@ -59,6 +58,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         switch UserDefaults.standard.string(forKey: "ThambiDebugWindowPage") {
         case "library": return .library
         case "notes": return .notes
+        case "practice": return .practice
+        case "friends": return .friends
         default: return .ask
         }
         #else
@@ -82,19 +83,27 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 // MARK: - Root
 
 enum MainWindowPage: Hashable {
-    case ask, library, notes
+    case ask, library, notes, practice, friends
+
+    static let ordered: [MainWindowPage] = [.ask, .library, .notes, .practice, .friends]
 }
 
 struct MainWindowView: View {
     @ObservedObject var library: StudyLibraryStore
     @ObservedObject var chat: StudyChatModel
+    @ObservedObject private var practice = StudyPracticeStore.shared
+    @ObservedObject private var social = StudySocialStore.shared
+    @ObservedObject private var progress = StudyProgressStore.shared
+    @ObservedObject private var focusTimer = StudyFocusTimer.shared
 
     @State var page: MainWindowPage = .ask
     @State private var pendingAdd: [URL]?
+    @State private var needsConsent = !ThambiPrivacy.hasAcceptedCurrentVersion
+    @State private var legalDocument: ThambiPrivacy.Document?
 
     var body: some View {
         HStack(spacing: 0) {
-            MainSidebar(library: library, chat: chat, page: $page, onAdd: chooseFilesToAdd)
+            MainSidebar(library: library, chat: chat, practice: practice, social: social, progress: progress, focusTimer: focusTimer, page: $page, onAdd: chooseFilesToAdd)
                 .frame(width: 228)
             Rectangle().fill(DS.Colors.borderSubtle).frame(width: 1)
             Group {
@@ -102,14 +111,22 @@ struct MainWindowView: View {
                 case .ask: AskPage(library: library, chat: chat, onAdd: chooseFilesToAdd)
                 case .library: LibraryPage(library: library, chat: chat, onAdd: chooseFilesToAdd)
                 case .notes: NotesPage(library: library, chat: chat)
+                case .practice: PracticePage(practice: practice, library: library, chat: chat, progress: progress)
+                case .friends: FriendsPage(social: social, library: library, practice: practice)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(DS.Colors.background)
         }
         .background(DS.Colors.background)
+        .background(pageShortcuts)
         .ignoresSafeArea(.container, edges: .top)
-        .preferredColorScheme(.dark)
+        .onAppear { practice.loadIfNeeded() }
+        .sheet(isPresented: $needsConsent) { ConsentSheet { needsConsent = false } }
+        .sheet(item: $legalDocument) { document in LegalDocumentSheet(document: document) { legalDocument = nil } }
+        .onReceive(NotificationCenter.default.publisher(for: .thambiShowLegalDocument)) { note in
+            legalDocument = (note.object as? String).flatMap(ThambiPrivacy.Document.init(rawValue:))
+        }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             loadDroppedURLs(providers)
             return true
@@ -127,6 +144,18 @@ struct MainWindowView: View {
                 onCancel: { pendingAdd = nil }
             )
         }
+    }
+
+    /// Command-1 to Command-5 switch pages.
+    private var pageShortcuts: some View {
+        ZStack {
+            ForEach(Array(MainWindowPage.ordered.enumerated()), id: \.offset) { index, target in
+                Button("") { page = target }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+            }
+        }
+        .opacity(0)
+        .accessibilityHidden(true)
     }
 
     private func chooseFilesToAdd() {
@@ -161,6 +190,10 @@ struct MainWindowView: View {
 private struct MainSidebar: View {
     @ObservedObject var library: StudyLibraryStore
     @ObservedObject var chat: StudyChatModel
+    @ObservedObject var practice: StudyPracticeStore
+    @ObservedObject var social: StudySocialStore
+    @ObservedObject var progress: StudyProgressStore
+    @ObservedObject var focusTimer: StudyFocusTimer
     @Binding var page: MainWindowPage
     let onAdd: () -> Void
 
@@ -169,7 +202,7 @@ private struct MainSidebar: View {
             HStack(spacing: 9) {
                 ThambiMascot(mood: chat.isAnswering ? .thinking : .idle, size: 24)
                 Text("Thambi")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(DS.font(15, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
             }
             .padding(.horizontal, 16)
@@ -180,17 +213,19 @@ private struct MainSidebar: View {
                 SidebarRow(title: "Ask", systemImage: "text.bubble", isSelected: page == .ask) { page = .ask }
                 SidebarRow(title: "Library", systemImage: "books.vertical", count: library.materials.filter { $0.kind != .note }.count, isSelected: page == .library) { page = .library }
                 SidebarRow(title: "Notes", systemImage: "note.text", count: library.notes.count, isSelected: page == .notes) { page = .notes }
+                SidebarRow(title: "Practice", systemImage: "rectangle.on.rectangle.angled", count: practice.dueCards(subject: nil).count, isSelected: page == .practice) { page = .practice }
+                SidebarRow(title: "Friends", systemImage: "person.2", count: social.totalUnread, isSelected: page == .friends) { page = .friends }
             }
             .padding(.horizontal, 8)
 
             HStack {
                 Text("Subjects")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(DS.font(12, .medium))
                     .foregroundColor(DS.Colors.textTertiary)
                 Spacer()
                 Button(action: onAdd) {
                     Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(DS.font(11, .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
@@ -231,8 +266,27 @@ private struct MainSidebar: View {
             }
 
             Spacer(minLength: 0)
+            FocusTimerWidget(timer: focusTimer, progress: progress, subject: chat.subjectScope)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
             StudyModePicker(chat: chat)
-                .padding(12)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+            HStack(spacing: 12) {
+                ForEach([ThambiPrivacy.Document.privacy, .terms]) { document in
+                    Button(document == .privacy ? "Privacy" : "Terms") {
+                        NotificationCenter.default.post(name: .thambiShowLegalDocument, object: document.rawValue)
+                    }
+                    .buttonStyle(.plain)
+                    .font(DS.font(11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .pointerCursor()
+                    .accessibilityLabel(document.title)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 6)
+            .padding(.bottom, 10)
         }
         .background(DS.Colors.surface1)
     }
@@ -253,11 +307,11 @@ private struct SidebarRow: View {
         Button(action: action) {
             HStack(spacing: 9) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(DS.font(12, .medium))
                     .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textTertiary)
                     .frame(width: 16)
                 Text(title)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .font(DS.font(13, isSelected ? .semibold : .regular))
                     .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textSecondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
@@ -289,14 +343,14 @@ private struct StudyModePicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Study mode")
-                .font(.system(size: 12, weight: .medium))
+                .font(DS.font(12, .medium))
                 .foregroundColor(DS.Colors.textTertiary)
             HStack(spacing: 2) {
                 ForEach(StudyMode.allCases, id: \.self) { mode in
                     let isSelected = chat.mode == mode
                     Button(action: { chat.setMode(mode) }) {
                         Text(mode.title)
-                            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                            .font(DS.font(12, isSelected ? .semibold : .regular))
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                             .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textSecondary)
@@ -315,7 +369,7 @@ private struct StudyModePicker: View {
             .background(RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous).fill(DS.Colors.well))
             .overlay(RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous).strokeBorder(DS.Colors.borderSubtle, lineWidth: 1))
             Text(chat.mode.explanation)
-                .font(.system(size: 11))
+                .font(DS.font(11))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -324,7 +378,7 @@ private struct StudyModePicker: View {
 
 // MARK: - Page header
 
-private struct PageHeader<Trailing: View>: View {
+struct PageHeader<Trailing: View>: View {
     let title: String
     let subtitle: String
     @ViewBuilder let trailing: () -> Trailing
@@ -333,10 +387,10 @@ private struct PageHeader<Trailing: View>: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(DS.font(20, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text(subtitle)
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textTertiary)
                     .lineLimit(1)
             }
@@ -349,7 +403,7 @@ private struct PageHeader<Trailing: View>: View {
     }
 }
 
-private struct WindowButton: View {
+struct WindowButton: View {
     enum Prominence { case primary, secondary }
     let title: String
     var systemImage: String? = nil
@@ -362,8 +416,8 @@ private struct WindowButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                if let systemImage { Image(systemName: systemImage).font(.system(size: 11, weight: .semibold)) }
-                Text(title).font(.system(size: 13, weight: .medium))
+                if let systemImage { Image(systemName: systemImage).font(DS.font(11, .semibold)) }
+                Text(title).font(DS.font(13, .medium))
             }
             .foregroundColor(prominence == .primary ? DS.Colors.textOnAccent : DS.Colors.textPrimary)
             .padding(.horizontal, 12)
@@ -449,12 +503,12 @@ private struct AskPage: View {
             Spacer()
             ThambiMascot(mood: .idle, size: 56)
             Text(library.materials.isEmpty ? "Add what you study, then ask" : "Ask about your materials")
-                .font(.system(size: 22, weight: .semibold))
+                .font(DS.font(22, .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
             Text(library.materials.isEmpty
                  ? "Thambi answers from your own notes and textbooks and shows where each answer came from."
                  : "Answers come from \(scopeLabel == "All subjects" ? "your library" : scopeLabel), with the page each one came from.")
-                .font(.system(size: 14))
+                .font(DS.font(14))
                 .foregroundColor(DS.Colors.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
@@ -473,7 +527,7 @@ private struct AskPage: View {
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(chat.mode == .restricted ? "Ask about your materials" : "Ask a question", text: $question, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 14))
+                    .font(DS.font(14))
                     .foregroundColor(DS.Colors.textPrimary)
                     .lineLimit(1...6)
                     .focused($isComposerFocused)
@@ -507,14 +561,27 @@ private struct AskPage: View {
                     }
                 } label: {
                     Text("In \(chat.subjectScope ?? "all subjects")")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(DS.font(12, .medium))
                         .foregroundColor(DS.Colors.textSecondary)
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Which subject to search")
+                Menu {
+                    ForEach(StudyAnswerFormat.allCases, id: \.self) { format in
+                        Button(format.title) { chat.answerFormat = format }
+                    }
+                } label: {
+                    Text(chat.answerFormat.shortTitle)
+                        .font(DS.font(12, .medium))
+                        .foregroundColor(chat.answerFormat == .normal ? DS.Colors.textSecondary : DS.Colors.accentText)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Write answers the way an exam marks them. Writing \"for 5 marks\" in a question works too.")
+                .accessibilityLabel("Answer length: \(chat.answerFormat.title)")
                 Text(modeLine)
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textTertiary)
                     .lineLimit(1)
                 Spacer()
@@ -545,6 +612,7 @@ private struct ChatMessageView: View {
     @ObservedObject var library: StudyLibraryStore
 
     @State private var openSourceNumber: Int?
+    @State private var pageSource: StudySource?
     @State private var didCopy = false
 
     var body: some View {
@@ -553,7 +621,7 @@ private struct ChatMessageView: View {
             HStack {
                 Spacer(minLength: 80)
                 Text(message.text)
-                    .font(.system(size: 14))
+                    .font(DS.font(14))
                     .foregroundColor(DS.Colors.textPrimary)
                     .textSelection(.enabled)
                     .padding(.horizontal, 14)
@@ -567,14 +635,14 @@ private struct ChatMessageView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     if message.text.isEmpty && message.isStreaming {
                         Text(message.sources.isEmpty ? "Looking through your materials" : "Reading \(message.sources.count) passages")
-                            .font(.system(size: 13))
+                            .font(DS.font(13))
                             .foregroundColor(DS.Colors.cool)
                     } else {
                         AnswerTextView(text: message.text)
                     }
                     if let errorText = message.errorText {
                         Text(errorText)
-                            .font(.system(size: 13))
+                            .font(DS.font(13))
                             .foregroundColor(DS.Colors.destructiveText)
                     }
                     if !message.isStreaming && message.errorText == nil {
@@ -583,6 +651,9 @@ private struct ChatMessageView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .sheet(item: $pageSource) { source in
+                SourcePageSheet(source: source, library: library) { pageSource = nil }
             }
         }
     }
@@ -596,17 +667,17 @@ private struct ChatMessageView: View {
         if !citedSources.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Sources")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(DS.font(12, .medium))
                     .foregroundColor(DS.Colors.textTertiary)
                 ForEach(citedSources) { source in
-                    SourceRow(source: source, isOpen: openSourceNumber == source.number, library: library) {
+                    SourceRow(source: source, isOpen: openSourceNumber == source.number, library: library, onOpenPage: { pageSource = source }) {
                         openSourceNumber = openSourceNumber == source.number ? nil : source.number
                     }
                 }
             }
         } else if !library.materials.isEmpty {
             Text(message.sources.isEmpty ? "Nothing in your materials matched this question." : "This answer didn't use your materials.")
-                .font(.system(size: 12))
+                .font(DS.font(12))
                 .foregroundColor(DS.Colors.textTertiary)
         }
     }
@@ -620,14 +691,25 @@ private struct ChatMessageView: View {
             }
             if message.savedNotePath != nil {
                 Text("Saved to My notes")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.success)
             } else if chat.mode.mayWrite {
                 WindowButton(title: "Save as note", systemImage: "square.and.arrow.down") { chat.saveAsNote(message.id) }
             } else {
                 Text("Switch to Write mode to save answers")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textTertiary)
+            }
+            if message.id == chat.messages.last?.id, !chat.isAnswering {
+                WindowButton(title: "Again", systemImage: "arrow.clockwise") { chat.regenerate(message.id) }
+                    .help("Write this answer again\(chat.answerFormat == .normal ? "" : " for \(chat.answerFormat.title)")")
+            }
+            Spacer()
+            if let cost = message.costRupees {
+                Text(StudyCost.label(rupees: cost))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .help("What this answer cost, worked out from its token counts")
             }
         }
     }
@@ -638,6 +720,7 @@ private struct SourceRow: View {
     let source: StudySource
     let isOpen: Bool
     @ObservedObject var library: StudyLibraryStore
+    let onOpenPage: () -> Void
     let toggle: () -> Void
 
     @State private var isHovered = false
@@ -652,16 +735,16 @@ private struct SourceRow: View {
                         .frame(width: 20, height: 20)
                         .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(DS.Colors.coolSubtle))
                     Text(source.placeLabel)
-                        .font(.system(size: 13))
+                        .font(DS.font(13))
                         .foregroundColor(DS.Colors.textPrimary)
                         .lineLimit(1)
                     Text(source.subject)
-                        .font(.system(size: 12))
+                        .font(DS.font(12))
                         .foregroundColor(DS.Colors.textTertiary)
                         .lineLimit(1)
                     Spacer()
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(DS.font(9, .semibold))
                         .foregroundColor(DS.Colors.textTertiary)
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                 }
@@ -678,13 +761,18 @@ private struct SourceRow: View {
             if isOpen {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(source.text)
-                        .font(.system(size: 13))
+                        .font(DS.font(13))
                         .foregroundColor(DS.Colors.textSecondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     if let material = library.materials.first(where: { $0.id == source.materialID }) {
-                        WindowButton(title: "Open \(material.kind == .note ? "note" : "original")", systemImage: "arrow.up.forward.app") {
-                            library.openOriginal(material)
+                        HStack(spacing: 8) {
+                            if material.kind == .pdf || material.kind == .image {
+                                WindowButton(title: source.page.map { "Show page \($0)" } ?? "Show", systemImage: "doc.viewfinder", action: onOpenPage)
+                            }
+                            WindowButton(title: "Open \(material.kind == .note ? "note" : "original")", systemImage: "arrow.up.forward.app") {
+                                library.openOriginal(material)
+                            }
                         }
                     }
                 }
@@ -790,7 +878,7 @@ private struct LibraryPage: View {
             if !library.isLoaded {
                 Spacer()
                 Text("Opening your library")
-                    .font(.system(size: 13))
+                    .font(DS.font(13))
                     .foregroundColor(DS.Colors.textTertiary)
                 Spacer()
             } else if shownMaterials.isEmpty && library.importItems.isEmpty {
@@ -824,13 +912,13 @@ private struct LibraryPage: View {
         VStack(spacing: 14) {
             Spacer()
             Image(systemName: "tray.and.arrow.down")
-                .font(.system(size: 34, weight: .light))
+                .font(DS.font(34, .light))
                 .foregroundColor(DS.Colors.textTertiary)
             Text(chat.subjectScope == nil ? "Your library is empty" : "Nothing in \(chat.subjectScope ?? "") yet")
-                .font(.system(size: 20, weight: .semibold))
+                .font(DS.font(20, .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
             Text("Drop PDFs, Word files, slides or photos of your notes here. Thambi reads scans and handwriting too.")
-                .font(.system(size: 14))
+                .font(DS.font(14))
                 .foregroundColor(DS.Colors.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -851,7 +939,7 @@ private struct LibraryPage: View {
                 Text("Added").frame(width: 90, alignment: .trailing)
                 Color.clear.frame(width: 28)
             }
-            .font(.system(size: 12, weight: .medium))
+            .font(DS.font(12, .medium))
             .foregroundColor(DS.Colors.textTertiary)
             .padding(.horizontal, 12)
             .frame(height: 28)
@@ -878,16 +966,16 @@ private struct LibraryPage: View {
             case .reading:
                 ProgressView().controlSize(.small)
                 Text("Reading \(item.fileName)")
-                    .font(.system(size: 13))
+                    .font(DS.font(13))
                     .foregroundColor(DS.Colors.cool)
                     .lineLimit(1)
                 Spacer()
             case .failed(let reason):
                 Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.destructiveText)
                 Text(reason)
-                    .font(.system(size: 13))
+                    .font(DS.font(13))
                     .foregroundColor(DS.Colors.textSecondary)
                     .lineLimit(2)
                 Spacer()
@@ -923,14 +1011,14 @@ private struct SubjectMemoryRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: "memorychip")
-                .font(.system(size: 14))
+                .font(DS.font(14))
                 .foregroundColor(library.isKeptInMemory(subject) ? DS.Colors.cool : DS.Colors.textTertiary)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Keep \(subject) in memory")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(DS.font(13, .medium))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text(detail)
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -971,24 +1059,24 @@ private struct MaterialRow: View {
         HStack(spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 13))
+                    .font(DS.font(13))
                     .foregroundColor(DS.Colors.textTertiary)
                     .frame(width: 18)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(material.title)
-                        .font(.system(size: 13))
+                        .font(DS.font(13))
                         .foregroundColor(DS.Colors.textPrimary)
                         .lineLimit(1)
                     if material.pagesReadFromPictures > 0 {
                         Text("\(material.pagesReadFromPictures) \(material.pagesReadFromPictures == 1 ? "page" : "pages") read from pictures")
-                            .font(.system(size: 11))
+                            .font(DS.font(11))
                             .foregroundColor(DS.Colors.textTertiary)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(material.subject)
-                .font(.system(size: 13))
+                .font(DS.font(13))
                 .foregroundColor(DS.Colors.textSecondary)
                 .lineLimit(1)
                 .frame(width: 150, alignment: .leading)
@@ -1001,14 +1089,14 @@ private struct MaterialRow: View {
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(width: 70, alignment: .trailing)
             Text(material.addedAt.formatted(.dateTime.day().month(.abbreviated)))
-                .font(.system(size: 12))
+                .font(DS.font(12))
                 .foregroundColor(DS.Colors.textTertiary)
                 .frame(width: 90, alignment: .trailing)
             Menu {
                 rowMenu
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(DS.font(12, .semibold))
                     .foregroundColor(DS.Colors.textSecondary)
             }
             .menuStyle(.borderlessButton)
@@ -1060,18 +1148,18 @@ private struct AddMaterialsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(urls.count == 1 ? "Add \(urls[0].lastPathComponent)" : "Add \(urls.count) items")
-                .font(.system(size: 16, weight: .semibold))
+                .font(DS.font(16, .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
                 .lineLimit(1)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Subject")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(DS.font(12, .medium))
                     .foregroundColor(DS.Colors.textSecondary)
                 HStack(spacing: 6) {
                     TextField(hasFolders ? "Use each folder's name" : "For example DBMS or Physics", text: $subject)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13))
+                        .font(DS.font(13))
                         .foregroundColor(DS.Colors.textPrimary)
                         .focused($isSubjectFocused)
                         .onSubmit(add)
@@ -1083,14 +1171,14 @@ private struct AddMaterialsSheet: View {
                         Menu {
                             ForEach(subjects, id: \.self) { existing in Button(existing) { subject = existing } }
                         } label: {
-                            Text("Existing").font(.system(size: 12, weight: .medium))
+                            Text("Existing").font(DS.font(12, .medium))
                         }
                         .menuStyle(.borderlessButton)
                         .fixedSize()
                     }
                 }
                 Text("Thambi reads the files on this Mac and keeps their text. The originals stay where they are.")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1177,15 +1265,15 @@ private struct NotesPage: View {
         VStack(spacing: 14) {
             Spacer()
             Image(systemName: "note.text")
-                .font(.system(size: 34, weight: .light))
+                .font(DS.font(34, .light))
                 .foregroundColor(DS.Colors.textTertiary)
             Text("No notes yet")
-                .font(.system(size: 20, weight: .semibold))
+                .font(DS.font(20, .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
             Text(chat.mode.mayWrite
                  ? "Write your own, or ask Thambi to make notes and save the answer."
                  : "Write your own. In Write mode Thambi can save notes for you too.")
-                .font(.system(size: 14))
+                .font(DS.font(14))
                 .foregroundColor(DS.Colors.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -1203,11 +1291,11 @@ private struct NotesPage: View {
                     Button(action: { select(note) }) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(note.title)
-                                .font(.system(size: 13, weight: selectedNoteID == note.id ? .semibold : .regular))
+                                .font(DS.font(13, selectedNoteID == note.id ? .semibold : .regular))
                                 .foregroundColor(DS.Colors.textPrimary)
                                 .lineLimit(1)
                             Text(note.addedAt.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
-                                .font(.system(size: 11))
+                                .font(DS.font(11))
                                 .foregroundColor(DS.Colors.textTertiary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1234,7 +1322,7 @@ private struct NotesPage: View {
             HStack(spacing: 8) {
                 TextField("Title", text: $draftTitle)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(DS.font(16, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                     .onChange(of: draftTitle) { _ in isDirty = true }
                 Spacer()
@@ -1248,7 +1336,7 @@ private struct NotesPage: View {
             .frame(height: 48)
             Rectangle().fill(DS.Colors.borderSubtle).frame(height: 1)
             TextEditor(text: $draftText)
-                .font(.system(size: 14))
+                .font(DS.font(14))
                 .foregroundColor(DS.Colors.textPrimary)
                 .scrollContentBackground(.hidden)
                 .padding(12)
@@ -1285,11 +1373,11 @@ private struct NotesPage: View {
         let existingPath = library.notes.first(where: { $0.id == selectedNoteID })?.sourcePath
         _ = library.saveNote(title: title, markdown: "# \(title)\n\n\(draftText)", replacing: existingPath)
         isDirty = false
-        if selectedNoteID == nil {
-            // The new note appears once it has been read; pick it then.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                selectedNoteID = library.notes.first(where: { $0.title == StudyLibrary.displayTitle(forFileName: title) })?.id ?? library.notes.first?.id
-            }
+        // A new or renamed note gets a new entry once it has been read; pick it then.
+        let previousID = selectedNoteID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard selectedNoteID == previousID, previousID == nil || !library.notes.contains(where: { $0.id == previousID }) else { return }
+            selectedNoteID = library.notes.first(where: { $0.title == StudyLibrary.displayTitle(forFileName: title + ".md") })?.id ?? library.notes.first?.id
         }
     }
 }

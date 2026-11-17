@@ -93,6 +93,8 @@ The Xcode project, target and source folder are still called `leanring-buddy` (h
 
 ## Build and run
 
+Unit tests for the pure rules live in `Tests/` (library, drawing, core: memory, dictionary, computer-control safety, notes, speech helpers, routing). Run `scripts/run-tests.sh` before every install; it needs only `swiftc`, no network and no cost. Add a check there for every bug fixed in a pure file.
+
 Build in Xcode (scheme `leanring-buddy`), or Release from the command line; signing uses the Apple Development identity, so macOS permissions persist across rebuilds. Ad-hoc ("Sign to Run Locally") signing makes macOS forget permissions on every rebuild.
 
 ```bash

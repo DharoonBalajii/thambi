@@ -577,6 +577,17 @@ final class CompanionManager: ObservableObject {
                 if let debugPDFPath, let document = await OpenDocumentReader.readPDF(at: URL(fileURLWithPath: debugPDFPath)) {
                     debugDocumentText = OpenDocumentReader.promptSection(for: document)
                 }
+                // With a test library, the library step runs exactly as in a real spoken question.
+                var debugSubjectMemory: String?
+                if UserDefaults.standard.string(forKey: "ThambiDebugLibraryDirectory") != nil {
+                    StudyLibraryStore.shared.loadIfNeeded()
+                    while StudyLibraryStore.shared.materials.isEmpty { try? await Task.sleep(nanoseconds: 100_000_000) }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if let modeName = UserDefaults.standard.string(forKey: "ThambiDebugMode"), let mode = StudyMode(rawValue: modeName) { ThambiSettings.studyMode = mode }
+                    let context = await Self.libraryContextForSpokenQuestion(debugQuestion, mode: ThambiSettings.studyMode)
+                    debugSubjectMemory = context.subjectMemory
+                    if let section = context.section { debugDocumentText = [debugDocumentText, section].compactMap { $0 }.joined(separator: "\n\n") }
+                }
                 let debugWantsDrawing = ThambiDrawing.userAskedToDraw(debugQuestion)
                 var answer = (try? await claudeAPI.analyzeImageStreaming(
                     images: [(data: debugImageData, label: label)],
@@ -584,6 +595,7 @@ final class CompanionManager: ObservableObject {
                         + SpeechTimedTags.markPromptSection
                         + (UserDefaults.standard.bool(forKey: "ThambiDebugControlOn") ? Self.controlPromptSection(canOperate: true, isSwitchedOn: true) : "")
                         + ThambiMemory.promptSection(for: debugMemoryText),
+                    subjectMemoryText: debugSubjectMemory,
                     documentText: debugDocumentText,
                     extraInstructions: debugWantsDrawing ? ThambiDrawing.promptSection
                         : (SpeechTimedTags.userAskedToMark(debugQuestion) ? SpeechTimedTags.markRequestSection : nil),
@@ -1365,17 +1377,10 @@ final class CompanionManager: ObservableObject {
                 // Study library: passages from the student's own materials ride along when they
                 // plainly answer the question (searching is free, on this Mac). Restricted mode
                 // always sends them, and the answer must come from them alone.
+                let libraryContext = await Self.libraryContextForSpokenQuestion(transcript, mode: studyMode)
                 var referenceSections: [String] = openDocument.map { [OpenDocumentReader.promptSection(for: $0)] } ?? []
-                let studyLibrary = StudyLibraryStore.shared
-                var subjectMemoryText: String?
-                if !studyLibrary.materials.isEmpty || studyMode.usesOnlyMaterials {
-                    let found = await studyLibrary.sources(for: transcript, limit: 4)
-                    if found.isRelevant || studyMode.usesOnlyMaterials {
-                        subjectMemoryText = studyLibrary.subjectMemory(for: studyLibrary.memorySubject(scope: nil, sources: found.sources))?.text
-                        referenceSections.append(StudyLibrary.promptSection(sources: found.sources, mode: studyMode, isSpoken: true))
-                        print("📚 Voice: \(found.sources.count) passage(s) from the library")
-                    }
-                }
+                if let librarySection = libraryContext.section { referenceSections.append(librarySection) }
+                let subjectMemoryText = libraryContext.subjectMemory
                 guard !Task.isCancelled else { return }
 
                 // Instructions only this kind of question needs, in their own cached block.
@@ -1428,6 +1433,9 @@ final class CompanionManager: ObservableObject {
                 let spreadsStepsOverSentences = buildsDrawingUp && !timedTags.events.contains(.revealStep)
                 if let drawingToShow {
                     drawingPanelController.show(drawingToShow, buildsUp: buildsDrawingUp)
+                    if let source = drawingExtraction.source {
+                        StudySocialStore.shared.lastDrawing = (drawingToShow.title.isEmpty ? "Drawing" : drawingToShow.title, source)
+                    }
                     print("✏️ Drawing shown (\(drawingExtraction.source?.count ?? 0) chars)")
                 } else if drawingExtraction.source != nil {
                     print("✏️ Drawing dropped: \(userAskedForDrawing ? "it could not be read" : "the question didn't ask for one")")
@@ -1616,6 +1624,19 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Interrupt by talking: while the voice plays, listen for the user starting to speak and stop.
+    /// Passages from the study library for a spoken question, and the whole subject when it is
+    /// kept in memory. Searching is free (on this Mac). Passages ride along only when they plainly
+    /// answer the question; Restricted mode always sends them, since answers must come from them.
+    static func libraryContextForSpokenQuestion(_ transcript: String, mode studyMode: StudyMode) async -> (section: String?, subjectMemory: String?, sourceCount: Int) {
+        let studyLibrary = StudyLibraryStore.shared
+        guard !studyLibrary.materials.isEmpty || studyMode.usesOnlyMaterials else { return (nil, nil, 0) }
+        let found = await studyLibrary.sources(for: transcript, limit: 4)
+        guard found.isRelevant || studyMode.usesOnlyMaterials else { return (nil, nil, 0) }
+        let subjectMemory = studyLibrary.subjectMemory(for: studyLibrary.memorySubject(scope: nil, sources: found.sources))?.text
+        print("📚 Voice: \(found.sources.count) passage(s) from the library\(subjectMemory == nil ? "" : ", subject kept in memory")")
+        return (StudyLibrary.promptSection(sources: found.sources, mode: studyMode, isSpoken: true), subjectMemory, found.sources.count)
+    }
+
     private func startBargeInListeningIfEnabled() {
         guard isBargeInEnabled, isAnswerInProgress, systemSpeechTTSClient.isPlaying else { return }
         // Opening a Bluetooth headset's microphone would drop the headphones to call quality.

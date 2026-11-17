@@ -113,6 +113,7 @@ final class DrawingPanelController: ObservableObject {
                     .frame(width: size.width, height: size.height)
                     .padding(16)
                     .background(DS.Colors.background)
+                    .environment(\.colorScheme, .dark)
             )
             renderer.scale = 2
             return renderer.nsImage
@@ -136,6 +137,7 @@ final class DrawingPanelController: ObservableObject {
         drawingPanel.hasShadow = true
         drawingPanel.isMovableByWindowBackground = true
         drawingPanel.level = .floating
+        drawingPanel.appearance = NSAppearance(named: .darkAqua)
         drawingPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         drawingPanel.hidesOnDeactivate = false
         drawingPanel.becomesKeyOnlyIfNeeded = true
@@ -181,7 +183,7 @@ struct DrawingPanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text(controller.drawing?.title.isEmpty == false ? controller.drawing!.title : "Drawing")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(DS.font(13, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -191,7 +193,7 @@ struct DrawingPanelView: View {
                     .help("Save the drawing as a PNG file")
                 Button(action: { controller.close() }) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(DS.font(10, .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
                         .frame(width: 24, height: 24)
                         .background(RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous).fill(DS.Colors.surface2))
@@ -236,7 +238,7 @@ private struct DrawingHeaderButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .font(DS.font(12, .medium))
                 .foregroundColor(DS.Colors.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(height: 24)

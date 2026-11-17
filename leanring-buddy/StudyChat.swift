@@ -27,6 +27,9 @@ nonisolated struct StudyChatMessage: Identifiable, Equatable, Sendable {
     var savedNotePath: String?
     var modeUsed: StudyMode = .write
     var subjectScope: String?
+    var format: StudyAnswerFormat = .normal
+    /// What this answer cost, from its token counts.
+    var costRupees: Double?
 }
 
 @MainActor
@@ -37,12 +40,15 @@ final class StudyChatModel: ObservableObject {
     /// Nil means every subject.
     @Published var subjectScope: String?
     @Published private(set) var mode: StudyMode = ThambiSettings.studyMode
+    /// Marks the next answers are written for. "for 5 marks" in a question wins over this.
+    @Published var answerFormat: StudyAnswerFormat = .normal
     /// Token counts of the last answer (counts only), for the log and cost checks.
     private(set) var lastTokenSummary = ""
 
     private let library: StudyLibraryStore
     private let claudeAPI = ClaudeAPI(proxyURL: CompanionManager.openRouterMessagesURL, model: ClickyModelRouter.haikuModelID)
     private var answerTask: Task<Void, Never>?
+    private var currentAnswerID: UUID?
     private var modeObserver: NSObjectProtocol?
 
     init(library: StudyLibraryStore = .shared) {
@@ -74,18 +80,21 @@ final class StudyChatModel: ObservableObject {
         guard !question.isEmpty, !isAnswering else { return }
         let modeForThisQuestion = mode
         let scope = subjectScope
+        let format = StudyAnswerFormat.detected(in: question) ?? answerFormat
         messages.append(StudyChatMessage(role: .student, text: question, modeUsed: modeForThisQuestion, subjectScope: scope))
-        let answer = StudyChatMessage(role: .thambi, text: "", isStreaming: true, modeUsed: modeForThisQuestion, subjectScope: scope)
+        let answer = StudyChatMessage(role: .thambi, text: "", isStreaming: true, modeUsed: modeForThisQuestion, subjectScope: scope, format: format)
         messages.append(answer)
         let answerID = answer.id
         isAnswering = true
+        currentAnswerID = answerID
 
         // Earlier turns ride along (shortened) so follow-ups like "give an example" work.
         let history: [(userPlaceholder: String, assistantResponse: String)] = messages.dropLast(2).pairsForHistory()
 
         answerTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.isAnswering = false }
+            // A stopped answer finishing late must not mark a newer one as done.
+            defer { if self.currentAnswerID == answerID { self.isAnswering = false } }
             let found = await library.sources(for: question, subject: scope)
             self.update(answerID) { $0.sources = found.sources }
 
@@ -112,19 +121,21 @@ final class StudyChatModel: ObservableObject {
                     subjectMemoryText: subjectMemory?.text,
                     documentText: sourcesSection,
                     cachesDocumentText: false,
-                    maximumOutputTokens: 1_200,
+                    maximumOutputTokens: format.maximumOutputTokens,
                     conversationHistory: history,
-                    userPrompt: question,
+                    userPrompt: format.instruction.map { "\(question)\n\n(\($0))" } ?? question,
                     onTextChunk: { [weak self] partial in
                         self?.update(answerID) { $0.text = partial }
                     }
                 )
                 let cleaned = StudyLibrary.withoutUnknownCitations(SpeechTimedTags.withoutLeakedReasoning(fullText), sourceCount: sources.count)
                 let cited = StudyLibrary.citedSourceNumbers(in: cleaned, sourceCount: sources.count)
+                let usage = claudeAPI.lastTokenUsage
                 update(answerID) {
                     $0.text = cleaned
                     $0.citedNumbers = cited
                     $0.isStreaming = false
+                    $0.costRupees = usage.rupees
                 }
                 lastTokenSummary = claudeAPI.lastTokenUsage.summary
                 print("📚 Ask: \(sources.count) sources, cited \(cited.count)\(memorySubject == nil ? "" : ", subject kept in memory") — tokens \(claudeAPI.lastTokenUsage.summary)")
@@ -152,6 +163,7 @@ final class StudyChatModel: ObservableObject {
     func stop() {
         answerTask?.cancel()
         answerTask = nil
+        currentAnswerID = nil
         isAnswering = false
         if let index = messages.lastIndex(where: { $0.isStreaming }) { messages[index].isStreaming = false }
     }
@@ -159,6 +171,18 @@ final class StudyChatModel: ObservableObject {
     func clear() {
         stop()
         messages.removeAll()
+    }
+
+    /// The last answer again, from scratch (with the marks now chosen, if the question names none).
+    func regenerate(_ answerID: UUID) {
+        guard !isAnswering, let answerIndex = messages.firstIndex(where: { $0.id == answerID }),
+              answerIndex == messages.count - 1, answerIndex > 0,
+              messages[answerIndex - 1].role == .student else { return }
+        let question = messages[answerIndex - 1].text
+        let scope = messages[answerIndex].subjectScope
+        messages.removeSubrange((answerIndex - 1)...)
+        subjectScope = scope
+        ask(question)
     }
 
     /// Only Write mode lets Thambi save. The title is the student's question.
@@ -193,7 +217,9 @@ private extension ArraySlice where Element == StudyChatMessage {
             case .student: pendingQuestion = message.text
             case .thambi:
                 if let question = pendingQuestion, !message.text.isEmpty, message.errorText == nil {
-                    pairs.append((question, ThambiSettings.shortenedForHistory(message.text)))
+                    // Source numbers belong to that answer's passages; the next question gets new ones.
+                    let withoutCitations = message.text.replacingOccurrences(of: #"\[\d{1,2}\]"#, with: "", options: .regularExpression)
+                    pairs.append((question, ThambiSettings.shortenedForHistory(withoutCitations)))
                 }
                 pendingQuestion = nil
             }

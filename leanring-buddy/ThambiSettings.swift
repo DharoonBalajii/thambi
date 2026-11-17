@@ -55,6 +55,28 @@ enum ThambiSettings {
         }
     }
 
+    // MARK: - Appearance
+
+    enum Appearance: String, CaseIterable {
+        case system, light, dark
+        var title: String {
+            switch self {
+            case .system: return "Auto"
+            case .light: return "Light"
+            case .dark: return "Dark"
+            }
+        }
+    }
+
+    private static let appearanceKey = "appAppearance"
+
+    /// Light, dark, or whatever the Mac is set to. The things Thambi draws over your screen
+    /// (pointer, captions, drawings) stay dark either way so they read on any background.
+    static var appearance: Appearance {
+        get { UserDefaults.standard.string(forKey: appearanceKey).flatMap(Appearance.init(rawValue:)) ?? .system }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: appearanceKey) }
+    }
+
     // MARK: - Captions
 
     private static let captionsKey = "captionsEnabled"

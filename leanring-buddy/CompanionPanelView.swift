@@ -27,6 +27,8 @@ struct CompanionPanelView: View {
     @AppStorage("panelSectionVoiceExpanded") private var isVoiceSectionExpanded = false
     @AppStorage("panelSectionControlExpanded") private var isControlSectionExpanded = false
     @State private var dictationLocaleIdentifiers: [String] = []
+    @State private var appearance = ThambiSettings.appearance
+    @State private var studyMode: StudyMode = ThambiSettings.studyMode
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isReadyForEverydayUse: Bool {
@@ -48,6 +50,8 @@ struct CompanionPanelView: View {
 
                 PanelSection(title: "Answers", summary: answersSummary, isExpanded: $isAnswersSectionExpanded) {
                     modelPickerRow
+                    studyModeRow
+                    appearanceRow
                     voiceSpeedRow
                     captionsRow
                     bargeInRow
@@ -97,7 +101,6 @@ struct CompanionPanelView: View {
                 }
             }
         )
-        .environment(\.colorScheme, .dark)
         .onAppear {
             if companionManager.typeQuestionFocusRequestCount > 0 { focusQuestionField() }
             if dictationLocaleIdentifiers.isEmpty {
@@ -130,10 +133,10 @@ struct CompanionPanelView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Thambi")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(DS.font(14, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text(statusText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(DS.font(11, .medium))
                     .foregroundColor(isThambiBusy ? DS.Colors.cool : DS.Colors.textTertiary)
             }
 
@@ -144,7 +147,7 @@ struct CompanionPanelView: View {
                 NotificationCenter.default.post(name: .thambiShowMainWindow, object: nil)
             }) {
                 Text("Study window")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(DS.font(12, .medium))
                     .foregroundColor(DS.Colors.textPrimary)
                     .padding(.horizontal, 9)
                     .frame(height: 24)
@@ -158,7 +161,7 @@ struct CompanionPanelView: View {
                 NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(DS.font(10, .semibold))
                     .foregroundColor(DS.Colors.textSecondary)
                     .frame(width: 24, height: 24)
                     .background(RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous).fill(DS.Colors.surface2))
@@ -226,22 +229,22 @@ struct CompanionPanelView: View {
         if isReadyForEverydayUse {
             Text("Hold \(companionManager.pushToTalkShortcut.menuTitle) to talk, or type below (\(BuddyPushToTalkShortcut.typeQuestionShortcutDisplayText)).")
                 .fixedSize(horizontal: false, vertical: true)
-                .font(.system(size: 12))
+                .font(DS.font(12))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
             Text("You're all set. Hit Start to meet Thambi.")
-                .font(.system(size: 12))
+                .font(DS.font(12))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.hasCompletedOnboarding {
             // Permissions were revoked after onboarding — tell user to re-grant
             VStack(alignment: .leading, spacing: 4) {
                 Text("Permissions needed")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(DS.font(13, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text("Some permissions were revoked. Grant all four below to keep using Thambi.")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -249,14 +252,14 @@ struct CompanionPanelView: View {
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Hi, this is Thambi.")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(DS.font(13, .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text("An AI study buddy that lives next to your cursor and helps you learn as you use your computer.")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Nothing runs in the background. Thambi only takes a screenshot when you press the hotkey.")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -270,7 +273,7 @@ struct CompanionPanelView: View {
         HStack(spacing: 8) {
             TextField("", text: $typedQuestion, prompt: Text("Type a question").foregroundColor(DS.Colors.textTertiary))
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(DS.font(13))
                 .foregroundColor(DS.Colors.textPrimary)
                 .focused($isQuestionFieldFocused)
                 .onSubmit { submitTypedQuestion() }
@@ -283,8 +286,8 @@ struct CompanionPanelView: View {
             if companionManager.isAnswerInProgress {
                 Button(action: { companionManager.stopAnswer() }) {
                     HStack(spacing: 5) {
-                        Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold))
-                        Text("Stop").font(.system(size: 12, weight: .semibold))
+                        Image(systemName: "stop.fill").font(DS.font(9, .bold))
+                        Text("Stop").font(DS.font(12, .semibold))
                     }
                     .foregroundColor(DS.Colors.destructiveText)
                     .padding(.horizontal, 10)
@@ -298,7 +301,7 @@ struct CompanionPanelView: View {
                 let canSend = ThambiSettings.preparedTypedQuestion(typedQuestion) != nil
                 Button(action: { submitTypedQuestion() }) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(DS.font(12, .bold))
                         .foregroundColor(canSend ? DS.Colors.textOnAccent : DS.Colors.textTertiary)
                         .frame(width: 28, height: 28)
                         .background(
@@ -337,7 +340,7 @@ struct CompanionPanelView: View {
     private func settingRow<Control: View>(_ title: String, help: String? = nil, @ViewBuilder control: () -> Control) -> some View {
         HStack(spacing: 10) {
             Text(title)
-                .font(.system(size: 13))
+                .font(DS.font(13))
                 .foregroundColor(DS.Colors.textPrimary)
             Spacer(minLength: 8)
             control()
@@ -348,7 +351,7 @@ struct CompanionPanelView: View {
 
     private func noteText(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11))
+            .font(DS.font(11))
             .foregroundColor(DS.Colors.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -358,10 +361,10 @@ struct CompanionPanelView: View {
     private func menuLabel(_ title: String) -> some View {
         HStack(spacing: 5) {
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .font(DS.font(12, .medium))
                 .lineLimit(1)
             Image(systemName: "chevron.up.chevron.down")
-                .font(.system(size: 8, weight: .semibold))
+                .font(DS.font(8, .semibold))
                 .foregroundColor(DS.Colors.textTertiary)
         }
         .foregroundColor(DS.Colors.textPrimary)
@@ -378,7 +381,7 @@ struct CompanionPanelView: View {
     private func outlinedButton(_ title: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .font(DS.font(12, .medium))
                 .foregroundColor(DS.Colors.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(height: 24)
@@ -403,7 +406,7 @@ struct CompanionPanelView: View {
                 let isSelected = option.value == selection
                 Button(action: { onSelect(option.value) }) {
                     Text(option.label)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                        .font(DS.font(12, isSelected ? .semibold : .regular))
                         .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textSecondary)
                         .padding(.horizontal, 9)
                         .frame(height: 22)
@@ -426,11 +429,14 @@ struct CompanionPanelView: View {
     // MARK: - Answers
 
     private var answersSummary: String {
+        let model: String
         switch companionManager.selectedModel {
-        case ClickyModelRouter.haikuModelID: return "Haiku"
-        case ClickyModelRouter.sonnetModelID: return "Sonnet"
-        default: return "Auto"
+        case ClickyModelRouter.haikuModelID: model = "Haiku"
+        case ClickyModelRouter.sonnetModelID: model = "Sonnet"
+        default: model = "Auto"
         }
+        // Write is the everyday mode; only the limiting modes are worth showing when folded.
+        return studyMode == .write ? model : "\(model), \(studyMode.title)"
     }
 
     private var modelPickerRow: some View {
@@ -439,6 +445,34 @@ struct CompanionPanelView: View {
                 [("Auto", ClickyModelRouter.autoModeIdentifier), ("Haiku", ClickyModelRouter.haikuModelID), ("Sonnet", ClickyModelRouter.sonnetModelID)],
                 selection: companionManager.selectedModel,
                 onSelect: { companionManager.setSelectedModel($0) }
+            )
+        }
+    }
+
+    /// The same study mode as the window's sidebar: it decides what voice answers may do too.
+    private var studyModeRow: some View {
+        settingRow("Study mode", help: studyMode.explanation) {
+            segmentedChoice(
+                StudyMode.allCases.map { ($0.title, $0) },
+                selection: studyMode,
+                onSelect: { ThambiSettings.studyMode = $0 }
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ThambiSettings.studyModeChangedNotification)) { _ in
+            studyMode = ThambiSettings.studyMode
+        }
+    }
+
+    private var appearanceRow: some View {
+        settingRow("Appearance", help: "Auto follows your Mac. What Thambi draws over your screen stays dark.") {
+            segmentedChoice(
+                ThambiSettings.Appearance.allCases.map { ($0.title, $0) },
+                selection: appearance,
+                onSelect: {
+                    ThambiSettings.appearance = $0
+                    appearance = $0
+                    ThambiSettings.applyAppearance()
+                }
             )
         }
     }
@@ -645,7 +679,7 @@ struct CompanionPanelView: View {
                 Text("stops everything")
                 Spacer(minLength: 0)
             }
-            .font(.system(size: 11))
+            .font(DS.font(11))
             .foregroundColor(DS.Colors.textTertiary)
             .padding(.top, 2)
             .padding(.bottom, 4)
@@ -673,7 +707,7 @@ struct CompanionPanelView: View {
                 companionManager.triggerOnboarding()
             }) {
                 Text("Start")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(DS.font(14, .semibold))
                     .foregroundColor(DS.Colors.textOnAccent)
                     .frame(maxWidth: .infinity)
                     .frame(height: 36)
@@ -692,7 +726,7 @@ struct CompanionPanelView: View {
     private var settingsSection: some View {
         VStack(spacing: 0) {
             Text("Permissions")
-                .font(.system(size: 12, weight: .semibold))
+                .font(DS.font(12, .semibold))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 4)
@@ -712,7 +746,7 @@ struct CompanionPanelView: View {
     private func grantButton(_ title: String = "Grant", isPrimary: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(DS.font(12, .semibold))
                 .foregroundColor(isPrimary ? DS.Colors.textOnAccent : DS.Colors.textPrimary)
                 .padding(.horizontal, 10)
                 .frame(height: 24)
@@ -734,17 +768,17 @@ struct CompanionPanelView: View {
     ) -> some View {
         HStack(spacing: 10) {
             Image(systemName: iconName)
-                .font(.system(size: 12, weight: .medium))
+                .font(DS.font(12, .medium))
                 .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.accentText)
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.system(size: 13))
+                    .font(DS.font(13))
                     .foregroundColor(DS.Colors.textPrimary)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 11))
+                        .font(DS.font(11))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -754,7 +788,7 @@ struct CompanionPanelView: View {
 
             if isGranted {
                 Label("Granted", systemImage: "checkmark")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(DS.font(11, .medium))
                     .foregroundColor(DS.Colors.success)
             } else {
                 actions()
@@ -832,7 +866,7 @@ struct CompanionPanelView: View {
                 NSApp.terminate(nil)
             }) {
                 Text("Quit Thambi")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.textSecondary)
                     .frame(height: 24)
                     .contentShape(Rectangle())
@@ -847,7 +881,7 @@ struct CompanionPanelView: View {
                 confirmAndShutDownCompletely()
             }) {
                 Text("Shut down and remove access")
-                    .font(.system(size: 12))
+                    .font(DS.font(12))
                     .foregroundColor(DS.Colors.destructiveText)
                     .frame(height: 24)
                     .contentShape(Rectangle())
@@ -904,17 +938,17 @@ private struct PanelSection<Content: View>: View {
             Button(action: { isExpanded.toggle() }) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(DS.font(12, .semibold))
                         .foregroundColor(DS.Colors.textPrimary)
                     Spacer(minLength: 8)
                     if !isExpanded {
                         Text(summary)
-                            .font(.system(size: 12))
+                            .font(DS.font(12))
                             .foregroundColor(DS.Colors.textTertiary)
                             .lineLimit(1)
                     }
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(DS.font(9, .semibold))
                         .foregroundColor(DS.Colors.textTertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }

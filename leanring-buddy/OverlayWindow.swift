@@ -24,6 +24,7 @@ class OverlayWindow: NSWindow {
         // Make window transparent and non-interactive
         self.isOpaque = false
         self.backgroundColor = .clear
+        self.appearance = NSAppearance(named: .darkAqua)
         self.level = .screenSaver  // Always on top, above submenus and popups
         self.ignoresMouseEvents = true  // Click-through
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
@@ -209,7 +210,7 @@ struct BlueCursorView: View {
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
                 Text(welcomeText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(DS.font(11, .medium))
                     .foregroundColor(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -237,7 +238,7 @@ struct BlueCursorView: View {
             // Onboarding prompt — "press control + option and say hi" streamed after the welcome message
             if isCursorOnThisScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
                 Text(companionManager.onboardingPromptText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(DS.font(11, .medium))
                     .foregroundColor(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -267,7 +268,7 @@ struct BlueCursorView: View {
             // glow that settles, creating a "materializing" effect.
             if buddyNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty {
                 Text(navigationBubbleText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(DS.font(11, .medium))
                     .foregroundColor(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -1138,7 +1139,7 @@ private struct ScreenMarkView: View {
         .overlay(alignment: .topLeading) {
             if !mark.label.isEmpty {
                 Text(mark.label)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(DS.font(12, .semibold))
                     .foregroundColor(DS.Colors.well)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
