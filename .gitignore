@@ -7,3 +7,6 @@ releases/
 coding-plans/
 thambi-keys.env
 *.env
+
+# Launch video project (kept locally)
+launch-video/

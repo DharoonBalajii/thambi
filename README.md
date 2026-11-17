@@ -10,6 +10,10 @@ It lives in your Mac's menu bar and in its own study window, where it answers fr
 
 Basically a TA who never sighs when you ask the same question twice.
 
+## Launch video
+
+[▶ Watch the 60 second launch video](docs/media/thambi-launch.mp4): hold Control + Option, and Thambi reads your slide, draws on it and explains it in 3D from your own notes.
+
 ---
 
 ## How it feels
