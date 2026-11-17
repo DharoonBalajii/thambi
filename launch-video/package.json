@@ -1,0 +1,24 @@
+{
+  "name": "thambi-launch-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Thambi launch video, built with Remotion. All motion graphics are code; no stock footage.",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts Launch out/thambi-launch.mp4 --props={\"withMusic\":true}",
+    "music": "python3 tools/make_soundtrack.py",
+    "still": "remotion still src/index.ts Launch out/frame.png",
+    "render:v2": "remotion render src/index.ts LaunchV2 out/thambi-launch-v2.mp4 --props='{\"withMusic\":true}' --crf=18",
+    "music:v2": "python3 tools/make_sfx.py"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.544",
+    "@remotion/google-fonts": "4.0.544",
+    "@remotion/transitions": "4.0.544",
+    "@types/react": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "remotion": "4.0.544",
+    "typescript": "7.0.2"
+  }
+}

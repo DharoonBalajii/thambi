@@ -1,0 +1,17 @@
+[
+  {"id": "problem", "frames": 150, "speed": 1.4, "sfx": [{"type": "typing", "at": 7.1, "chars": 31, "rate": 0.868}, {"type": "click", "at": 74.3}]},
+  {"id": "stop", "frames": 60, "speed": 1.25},
+  {"id": "meet", "frames": 75, "speed": 1.2},
+  {"id": "tagline", "frames": 75, "speed": 1},
+  {"id": "keys", "frames": 72, "speed": 1, "sfx": [{"type": "keys", "at": 45}]},
+  {"id": "tutor", "frames": 510, "speed": 1, "sfx": [{"type": "pop", "at": 6}, {"type": "scan", "at": 62}, {"type": "draw", "at": 92, "len": 12}, {"type": "draw", "at": 104, "len": 18}, {"type": "draw", "at": 118, "len": 14}, {"type": "draw", "at": 166, "len": 12}, {"type": "draw", "at": 176, "len": 16}, {"type": "draw", "at": 190, "len": 16}, {"type": "draw", "at": 242, "len": 10}, {"type": "draw", "at": 252, "len": 18}, {"type": "keys", "at": 312}, {"type": "swish", "at": 342}, {"type": "pop", "at": 350}]},
+  {"id": "ownnotes", "frames": 90, "speed": 1},
+  {"id": "ask", "frames": 150, "speed": 1, "sfx": [{"type": "typing", "at": 12, "chars": 30, "rate": 0.75}, {"type": "pop", "at": 48}, {"type": "enter", "at": 62}]},
+  {"id": "remember", "frames": 120, "speed": 1.45, "sfx": [{"type": "typing", "at": 51, "chars": 61, "rate": 2.47}, {"type": "chime", "at": 93.8}]},
+  {"id": "friends", "frames": 135, "speed": 1, "sfx": [{"type": "click", "at": 94}, {"type": "pop", "at": 95}]},
+  {"id": "more", "frames": 120, "speed": 1},
+  {"id": "private", "frames": 75, "speed": 1},
+  {"id": "contrast", "frames": 78, "speed": 1.3},
+  {"id": "logo", "frames": 60, "speed": 1},
+  {"id": "cta", "frames": 45, "speed": 1.33}
+]
