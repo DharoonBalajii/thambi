@@ -12,7 +12,7 @@ Basically a TA who never sighs when you ask the same question twice.
 
 ## Launch video
 
-[![Watch the Thambi launch video](docs/media/launch-video-poster.jpg)](docs/media/thambi-launch.mp4)
+[![Watch the Thambi launch video](docs/media/launch-video-poster.jpg)](https://github.com/DharoonBalajii/thambi/raw/main/docs/media/thambi-launch.mp4)
 
 Hold Control + Option, and Thambi reads your slide, draws on it and explains it in 3D from your own notes. Click the picture to play the 60 second film.
 
